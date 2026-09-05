@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model users {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String    @db.VarChar(100)
+  email      String    @unique @db.VarChar(255)
+  password   String    @db.VarChar(255)
+  role       String    @default("customer") @db.VarChar(20)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  updated_at DateTime? @default(now()) @db.Timestamp(6)
+
+  orders orders[]
+}
+
+model categories {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String       @unique @db.VarChar(100)
+  slug       String       @unique @db.VarChar(100)
+  created_at DateTime?    @default(now()) @db.Timestamp(6)
+  updated_at DateTime?    @default(now()) @db.Timestamp(6)
+  parent_id  String?      @db.Uuid
+
+  parent   categories?  @relation("CategoryHierarchy", fields: [parent_id], references: [id])
+  children categories[] @relation("CategoryHierarchy")
+  products products[]
+}
+
+model products {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  category_id String     @db.Uuid
+  name        String     @db.VarChar(255)
+  description String?
+  price       Decimal    @db.Decimal(12, 2)
+  brand       String?    @db.VarChar(100)
+  sku         String     @unique @db.VarChar(100)
+  created_at  DateTime?  @default(now()) @db.Timestamp(6)
+  updated_at  DateTime?  @default(now()) @db.Timestamp(6)
+  slug        String     @unique @db.VarChar(255)
+
+  inventory   inventory?
+  categories  categories   @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_category")
+  order_items order_items[]
+}
+
+model inventory {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  product_id          String    @unique @db.Uuid
+  quantity            Int       @default(0)
+  reserved_quantity   Int       @default(0)
+  low_stock_threshold Int       @default(10)
+  created_at          DateTime? @default(now()) @db.Timestamp(6)
+  updated_at          DateTime? @default(now()) @db.Timestamp(6)
+
+  products products @relation(fields: [product_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_inventory_product")
+}
+
+model orders {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id        String    @db.Uuid
+  status         String    @default("pending") @db.VarChar(30)
+  payment_status String    @default("pending") @db.VarChar(30)
+  total_amount   Decimal   @db.Decimal(12, 2)
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+  updated_at     DateTime? @default(now()) @db.Timestamp(6)
+
+  users       users        @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_user")
+  order_items order_items[]
+}
+
+model order_items {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id     String    @db.Uuid
+  product_id   String    @db.Uuid
+  product_name String    @db.VarChar(255)
+  sku          String    @db.VarChar(100)
+  quantity     Int
+  unit_price   Decimal   @db.Decimal(12, 2)
+  subtotal     Decimal   @db.Decimal(12, 2)
+  created_at   DateTime? @default(now()) @db.Timestamp(6)
+
+  orders   orders   @relation(fields: [order_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_item_order")
+  products products @relation(fields: [product_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_item_product")
+}

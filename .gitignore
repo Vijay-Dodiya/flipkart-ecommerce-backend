@@ -1,2 +1,12 @@
 node_modules/
 .env
+.env.*
+!.env.example
+
+generated/
+*.stackdump
+
+.agents/
+.claude/
+.cursor/
+.devin/
