@@ -2,7 +2,7 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 
 import {
     createRazorpayOrder,
-    verifyRazorpayPayment
+    verifyRazorpayPayment,
 } from "../services/payment.service.js";
 
 export const createRazorpayOrderController = asyncHandler(
@@ -34,23 +34,29 @@ export const verifyRazorpayPaymentController = asyncHandler(
             razorpaySignature,
         } = req.body;
 
-        const updatedOrder = await verifyRazorpayPayment(
+        const result = await verifyRazorpayPayment({
             userId,
             orderId,
             razorpayPaymentId,
             razorpayOrderId,
-            razorpaySignature
-        );
+            razorpaySignature,
+        });
 
         res.status(200).json({
             success: true,
-            message: "Payment verified successfully",
+            message: result.alreadyPaid
+                ? "Payment was already verified"
+                : "Payment verified successfully",
             data: {
-                orderId: updatedOrder.id,
-                paymentStatus: updatedOrder.payment_status,
-                orderStatus: updatedOrder.status,
+                orderId: result.order.id,
+                paymentStatus:
+                    result.order.payment_status,
+                orderStatus:
+                    result.order.status,
                 razorpayPaymentId:
-                    updatedOrder.razorpay_payment_id,
+                    result.order.razorpay_payment_id,
+                alreadyPaid:
+                    result.alreadyPaid,
             },
         });
     }

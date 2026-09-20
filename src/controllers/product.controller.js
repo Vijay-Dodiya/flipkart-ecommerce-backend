@@ -18,14 +18,25 @@ export const createProductController = async (req, res) => {
     });
 };
 
+// I comment so that I can use the better code might be
+
+// export const getAllProductsController = async (req, res) => {
+
+//     const products = await getAllProducts();
+
+//     res.status(200).json({
+//         success: true,
+//         products,
+//     });
+// };
+
 export const getAllProductsController = async (req, res) => {
+  const result = await getAllProducts(req.query);
 
-    const products = await getAllProducts();
-
-    res.status(200).json({
-        success: true,
-        products,
-    });
+  res.status(200).json({
+    success: true,
+    ...result,
+  });
 };
 
 

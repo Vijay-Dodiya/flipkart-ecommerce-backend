@@ -4,11 +4,17 @@ import {
     createOrderController,
     getMyOrdersController,
     getOrderByIdController,
-    confirmPaymentController,
+    // confirmPaymentController,
     cancelOrderController,
 } from "../controllers/order.controller.js";
 
 import { authenticate } from "../middleware/auth.middleware.js";
+
+import { validate } from "../middleware/validate.middleware.js";
+
+import {
+    createOrderSchema,
+} from "../schemas/order.schema.js";
 
 const router = express.Router();
 
@@ -33,6 +39,7 @@ const router = express.Router();
 router.post(
     "/",
     authenticate,
+    validate(createOrderSchema),
     createOrderController
 );
 
@@ -122,11 +129,11 @@ router.get(
  *       404:
  *         description: Order not found
  */
-router.patch(
-    "/:id/payment",
-    authenticate,
-    confirmPaymentController
-);
+// router.patch(
+//     "/:id/payment",
+//     authenticate,
+//     confirmPaymentController
+// );
 
 /**
  * @openapi

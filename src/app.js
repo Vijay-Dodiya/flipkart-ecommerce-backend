@@ -20,6 +20,13 @@ import { errorHandler } from "./middleware/error.middleware.js";
 import webhookRoutes from "./routes/webhook.routes.js";
 
 import redisClient from "./config/redis.js";
+import { startGraphQLServer } from "./graphql/index.js";
+import shipmentRoutes from "./routes/shipment.routes.js";
+import orderStatusHistoryRoutes from "./routes/orderStatusHistory.routes.js";
+import addressRoutes from "./routes/address.routes.js";
+import reviewRoutes from "./routes/review.routes.js";
+import wishlistRoutes from "./routes/wishlist.routes.js";
+import couponRoutes from "./routes/coupon.routes.js";
 
 dotenv.config();
 
@@ -36,29 +43,25 @@ app.use("/api/webhooks", webhookRoutes);
 
 app.use(express.json());
 
-app.use(
-    "/api-docs",
-    swaggerUi.serve,
-    swaggerUi.setup(swaggerSpec)
-);
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // --------------------------------------------------
 // MEMORY RATE LIMITER
 // --------------------------------------------------
 
 const createMemoryRateLimiter = () => {
-    return rateLimit({
-        windowMs: 15 * 60 * 1000,
-        limit: 100,
+  return rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
 
-        standardHeaders: "draft-8",
-        legacyHeaders: false,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
 
-        message: {
-            success: false,
-            message: "Too many requests, please try again later.",
-        },
-    });
+    message: {
+      success: false,
+      message: "Too many requests, please try again later.",
+    },
+  });
 };
 
 // --------------------------------------------------
@@ -66,27 +69,26 @@ const createMemoryRateLimiter = () => {
 // --------------------------------------------------
 
 const createRedisRateLimiter = () => {
-    return rateLimit({
-        windowMs: 15 * 60 * 1000,
-        limit: 100,
+  return rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
 
-        standardHeaders: "draft-8",
-        legacyHeaders: false,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
 
-        passOnStoreError: true,
+    passOnStoreError: true,
 
-        store: new RedisStore({
-            sendCommand: (...args) =>
-                redisClient.sendCommand(args),
+    store: new RedisStore({
+      sendCommand: (...args) => redisClient.sendCommand(args),
 
-            prefix: "ratelimit:",
-        }),
+      prefix: "ratelimit:",
+    }),
 
-        message: {
-            success: false,
-            message: "Too many requests, please try again later.",
-        },
-    });
+    message: {
+      success: false,
+      message: "Too many requests, please try again later.",
+    },
+  });
 };
 
 // --------------------------------------------------
@@ -102,33 +104,23 @@ let redisRateLimiterCreated = false;
 // --------------------------------------------------
 
 const switchToRedisRateLimiter = () => {
+  if (!redisClient.isReady) {
+    return;
+  }
 
-    if (!redisClient.isReady) {
-        return;
-    }
+  if (redisRateLimiterCreated) {
+    return;
+  }
 
-    if (redisRateLimiterCreated) {
-        return;
-    }
+  try {
+    apiLimiter = createRedisRateLimiter();
 
-    try {
+    redisRateLimiterCreated = true;
 
-        apiLimiter = createRedisRateLimiter();
-
-        redisRateLimiterCreated = true;
-
-        console.log(
-            "Redis is ready. Switched to Redis-backed rate limiter."
-        );
-
-    } catch (error) {
-
-        console.error(
-            "Failed to create Redis rate limiter:",
-            error.message
-        );
-
-    }
+    console.log("Redis is ready. Switched to Redis-backed rate limiter.");
+  } catch (error) {
+    console.error("Failed to create Redis rate limiter:", error.message);
+  }
 };
 
 // --------------------------------------------------
@@ -136,12 +128,9 @@ const switchToRedisRateLimiter = () => {
 // --------------------------------------------------
 
 redisClient.on("ready", () => {
+  console.log("Redis ready event received.");
 
-    console.log(
-        "Redis ready event received."
-    );
-
-    switchToRedisRateLimiter();
+  switchToRedisRateLimiter();
 });
 
 // --------------------------------------------------
@@ -149,9 +138,7 @@ redisClient.on("ready", () => {
 // --------------------------------------------------
 
 app.use("/api", (req, res, next) => {
-
-    return apiLimiter(req, res, next);
-
+  return apiLimiter(req, res, next);
 });
 
 // --------------------------------------------------
@@ -165,25 +152,28 @@ app.use("/api/inventory", inventoryRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/payments", paymentRoutes);
-
+app.use("/api/shipments", shipmentRoutes);
+app.use("/api/order-status-history", orderStatusHistoryRoutes);
+app.use("/api/addresses", addressRoutes);
+app.use("/api", reviewRoutes);
+app.use("/api/wishlist", wishlistRoutes);
+app.use("/api/coupons", couponRoutes);
 // --------------------------------------------------
 // ROOT ROUTE
 // --------------------------------------------------
 
 app.get("/", (req, res) => {
-
-    res.json({
-        success: true,
-        message: "Flipkart E-Commerce Backend is running!"
-    });
-
+  res.json({
+    success: true,
+    message: "Flipkart E-Commerce Backend is running!",
+  });
 });
 
-// --------------------------------------------------
-// ERROR HANDLER
-// --------------------------------------------------
+// // --------------------------------------------------
+// // ERROR HANDLER
+// // --------------------------------------------------
 
-app.use(errorHandler);
+// app.use(errorHandler);
 
 // --------------------------------------------------
 // SERVER
@@ -196,99 +186,84 @@ const PORT = process.env.PORT || 5000;
 // --------------------------------------------------
 
 const startServer = async () => {
+  try {
+    // ------------------------------------------
+    // MongoDB
+    // ------------------------------------------
+
+    await connectMongoDB();
+
+    // ------------------------------------------
+    // Redis
+    // ------------------------------------------
 
     try {
+      if (!redisClient.isOpen) {
+        const redisConnectionAttempt = redisClient.connect();
 
-        // ------------------------------------------
-        // MongoDB
-        // ------------------------------------------
+        await Promise.race([
+          redisConnectionAttempt,
 
-        await connectMongoDB();
-
-        // ------------------------------------------
-        // Redis
-        // ------------------------------------------
-
-        try {
-
-            if (!redisClient.isOpen) {
-
-                const redisConnectionAttempt =
-                    redisClient.connect();
-
-                await Promise.race([
-
-                    redisConnectionAttempt,
-
-                    new Promise((_, reject) => {
-
-                        setTimeout(() => {
-
-                            reject(
-                                new Error(
-                                    "Redis connection timeout"
-                                )
-                            );
-
-                        }, 3000);
-
-                    }),
-
-                ]);
-
-            }
-
-        } catch (error) {
-
-            console.error(
-                "Redis unavailable at startup. Using memory rate limiter."
-            );
-
-            console.error(
-                error.message
-            );
-
-        }
-
-        // ------------------------------------------
-        // Check Redis after connection attempt
-        // ------------------------------------------
-
-        if (redisClient.isReady) {
-
-            switchToRedisRateLimiter();
-
-        } else {
-
-            console.log(
-                "Using memory rate limiter until Redis becomes available."
-            );
-
-        }
-
-        // ------------------------------------------
-        // Start HTTP server
-        // ------------------------------------------
-
-        app.listen(PORT, () => {
-
-            console.log(
-                `Server running on port ${PORT}`
-            );
-
-        });
-
+          new Promise((_, reject) => {
+            setTimeout(() => {
+              reject(new Error("Redis connection timeout"));
+            }, 3000);
+          }),
+        ]);
+      }
     } catch (error) {
+      console.error("Redis unavailable at startup. Using memory rate limiter.");
 
-        console.error(
-            "Failed to start server:",
-            error
-        );
-
-        process.exit(1);
-
+      console.error(error.message);
     }
 
+    // ------------------------------------------
+    // Check Redis after connection attempt
+    // ------------------------------------------
+
+    if (redisClient.isReady) {
+      switchToRedisRateLimiter();
+    } else {
+      console.log("Using memory rate limiter until Redis becomes available.");
+    }
+    // ------------------------------------------
+    // Start GraphQL
+    // ------------------------------------------
+    //
+    // Apollo Server must be started before its Express
+    // middleware is mounted.
+    //
+    // We do this before starting the HTTP server.
+    // ------------------------------------------
+
+    await startGraphQLServer(app);
+
+    // ------------------------------------------
+    // ERROR HANDLER
+    // ------------------------------------------
+    //
+    // IMPORTANT:
+    //
+    // Error handlers should be registered after the
+    // application's routes and middleware.
+    //
+    // GraphQL is now mounted before this handler.
+    // ------------------------------------------
+
+    app.use(errorHandler);
+
+    // ------------------------------------------
+    // Start HTTP server
+    // ------------------------------------------
+
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+
+    process.exit(1);
+  }
 };
 
 startServer();

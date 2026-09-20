@@ -14,6 +14,7 @@ import { validate } from "../middleware/validate.middleware.js";
 
 import { productSchema } from "../schemas/product.schema.js";
 import { updateProductSchema } from "../schemas/update-product.schema.js";
+import { productQuerySchema } from "../schemas/product-query.schema.js";
 
 const router = express.Router();
 
@@ -103,8 +104,9 @@ router.post(
  *         description: Products retrieved successfully
  */
 router.get(
-    "/",
-    getAllProductsController
+  "/",
+  validate(productQuerySchema, "query"),
+  getAllProductsController
 );
 
 /**

@@ -16,16 +16,20 @@ model users {
   created_at DateTime? @default(now()) @db.Timestamp(6)
   updated_at DateTime? @default(now()) @db.Timestamp(6)
 
-  orders orders[]
+  orders         orders[]
+  addresses      addresses[]
+  reviews        reviews[]
+  wishlist_items wishlist_items[]
+  coupon_usages  coupon_usages[]
 }
 
 model categories {
-  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  name       String       @unique @db.VarChar(100)
-  slug       String       @unique @db.VarChar(100)
-  created_at DateTime?    @default(now()) @db.Timestamp(6)
-  updated_at DateTime?    @default(now()) @db.Timestamp(6)
-  parent_id  String?      @db.Uuid
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String    @unique @db.VarChar(100)
+  slug       String    @unique @db.VarChar(100)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  updated_at DateTime? @default(now()) @db.Timestamp(6)
+  parent_id  String?   @db.Uuid
 
   parent   categories?  @relation("CategoryHierarchy", fields: [parent_id], references: [id])
   children categories[] @relation("CategoryHierarchy")
@@ -33,20 +37,27 @@ model categories {
 }
 
 model products {
-  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  category_id String     @db.Uuid
-  name        String     @db.VarChar(255)
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  category_id String    @db.Uuid
+  name        String    @db.VarChar(255)
   description String?
-  price       Decimal    @db.Decimal(12, 2)
-  brand       String?    @db.VarChar(100)
-  sku         String     @unique @db.VarChar(100)
-  created_at  DateTime?  @default(now()) @db.Timestamp(6)
-  updated_at  DateTime?  @default(now()) @db.Timestamp(6)
-  slug        String     @unique @db.VarChar(255)
+  price       Decimal   @db.Decimal(12, 2)
+  brand       String?   @db.VarChar(100)
+  sku         String    @unique @db.VarChar(100)
+  created_at  DateTime? @default(now()) @db.Timestamp(6)
+  updated_at  DateTime? @default(now()) @db.Timestamp(6)
+  slug        String    @unique @db.VarChar(255)
 
-  inventory   inventory?
-  categories  categories   @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_category")
-  order_items order_items[]
+  inventory      inventory?
+  categories     categories       @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_category")
+  order_items    order_items[]
+  reviews        reviews[]
+  wishlist_items wishlist_items[]
+
+  @@index([category_id])
+  @@index([price])
+  @@index([created_at])
+  @@index([brand])
 }
 
 model inventory {
@@ -62,18 +73,36 @@ model inventory {
 }
 
 model orders {
-  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  user_id             String    @db.Uuid
-  status              String    @default("pending") @db.VarChar(30)
-  payment_status      String    @default("pending") @db.VarChar(30)
-  total_amount        Decimal   @db.Decimal(12, 2)
-  razorpay_order_id   String?   @unique @db.VarChar(100)
-  razorpay_payment_id String?   @unique @db.VarChar(100)
-  created_at          DateTime? @default(now()) @db.Timestamp(6)
-  updated_at          DateTime? @default(now()) @db.Timestamp(6)
+  id             String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id        String @db.Uuid
+  status         String @default("pending") @db.VarChar(30)
+  payment_status String @default("pending") @db.VarChar(30)
 
-  users       users        @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_user")
-  order_items order_items[]
+  subtotal     Decimal @default(0) @db.Decimal(12, 2)
+  discount     Decimal @default(0) @db.Decimal(12, 2)
+  shipping_fee Decimal @default(0) @db.Decimal(12, 2)
+  tax_amount   Decimal @default(0) @db.Decimal(12, 2)
+  total_amount Decimal @db.Decimal(12, 2)
+
+  razorpay_order_id   String? @unique @db.VarChar(100)
+  razorpay_payment_id String? @unique @db.VarChar(100)
+
+  refund_status      String?   @db.VarChar(30)
+  razorpay_refund_id String?   @unique @db.VarChar(100)
+  refunded_at        DateTime? @db.Timestamp(6)
+
+  created_at   DateTime? @default(now()) @db.Timestamp(6)
+  updated_at   DateTime? @default(now()) @db.Timestamp(6)
+  confirmed_at DateTime? @db.Timestamp(6)
+  cancelled_at DateTime? @db.Timestamp(6)
+  delivered_at DateTime? @db.Timestamp(6)
+
+  users          users                  @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_user")
+  order_items    order_items[]
+  shipment       shipments?
+  status_history order_status_history[]
+  order_address  order_addresses?
+  coupon_usages  coupon_usages[]
 }
 
 model order_items {
@@ -92,9 +121,178 @@ model order_items {
 }
 
 model payment_webhook_events {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  event_id     String   @unique @db.VarChar(100)
-  event        String   @db.VarChar(100)
-  created_at   DateTime @default(now()) @db.Timestamp(6)
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  event_id   String   @unique @db.VarChar(100)
+  event      String   @db.VarChar(100)
+  created_at DateTime @default(now()) @db.Timestamp(6)
 }
 
+model shipments {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id            String    @unique @db.Uuid
+  carrier             String?   @db.VarChar(100)
+  tracking_number     String?   @unique @db.VarChar(100)
+  status              String    @default("ready") @db.VarChar(30)
+  shipped_at          DateTime? @db.Timestamp(6)
+  out_for_delivery_at DateTime? @db.Timestamp(6)
+  delivered_at        DateTime? @db.Timestamp(6)
+  created_at          DateTime  @default(now()) @db.Timestamp(6)
+  updated_at          DateTime  @default(now()) @db.Timestamp(6)
+
+  orders orders @relation(fields: [order_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_shipment_order")
+
+  tracking_events shipment_tracking_events[]
+
+  @@index([status])
+  @@index([carrier])
+}
+
+model shipment_tracking_events {
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipment_id String @db.Uuid
+
+  status      String  @db.VarChar(50)
+  description String? @db.VarChar(255)
+  location    String? @db.VarChar(255)
+
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  shipments shipments @relation(fields: [shipment_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_tracking_event_shipment")
+
+  @@index([shipment_id])
+  @@index([status])
+  @@index([created_at])
+}
+
+model order_status_history {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id   String   @db.Uuid
+  status     String   @db.VarChar(30)
+  changed_by String?  @db.Uuid
+  reason     String?  @db.Text
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  orders orders @relation(fields: [order_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_status_history_order")
+
+  @@index([order_id])
+  @@index([status])
+  @@index([created_at])
+}
+
+model addresses {
+  id      String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id String @db.Uuid
+
+  label     String @db.VarChar(50)
+  full_name String @db.VarChar(100)
+  phone     String @db.VarChar(20)
+
+  address_line1 String  @db.VarChar(255)
+  address_line2 String? @db.VarChar(255)
+
+  city        String @db.VarChar(100)
+  state       String @db.VarChar(100)
+  postal_code String @db.VarChar(20)
+  country     String @default("India") @db.VarChar(100)
+
+  is_default Boolean @default(false)
+
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  updated_at DateTime @default(now()) @db.Timestamp(6)
+
+  users users @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id])
+}
+
+model order_addresses {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id String @unique @db.Uuid
+
+  full_name String @db.VarChar(100)
+  phone     String @db.VarChar(20)
+
+  address_line1 String  @db.VarChar(255)
+  address_line2 String? @db.VarChar(255)
+
+  city        String @db.VarChar(100)
+  state       String @db.VarChar(100)
+  postal_code String @db.VarChar(20)
+  country     String @default("India") @db.VarChar(100)
+
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  orders orders @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model reviews {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String   @db.Uuid
+  product_id String   @db.Uuid
+  rating     Int
+  review     String?  @db.Text
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  updated_at DateTime @default(now()) @db.Timestamp(6)
+
+  users    users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_review_user")
+  products products @relation(fields: [product_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_review_product")
+
+  @@unique([user_id, product_id], map: "uq_review_user_product")
+  @@index([product_id])
+  @@index([user_id])
+  @@index([rating])
+}
+
+model wishlist_items {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String   @db.Uuid
+  product_id String   @db.Uuid
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  users    users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_wishlist_user")
+  products products @relation(fields: [product_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_wishlist_product")
+
+  @@unique([user_id, product_id], map: "uq_wishlist_user_product")
+  @@index([user_id])
+  @@index([product_id])
+}
+
+model coupons {
+  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                    String    @unique @db.VarChar(50)
+  discount_type           String    @db.VarChar(20)
+  discount_value          Decimal   @db.Decimal(12, 2)
+  minimum_order_amount    Decimal   @default(0) @db.Decimal(12, 2)
+  maximum_discount_amount Decimal?  @db.Decimal(12, 2)
+  usage_limit             Int?
+  used_count              Int       @default(0)
+  per_user_limit          Int       @default(1)
+  starts_at               DateTime  @default(now()) @db.Timestamp(6)
+  expires_at              DateTime? @db.Timestamp(6)
+  is_active               Boolean   @default(true)
+  created_at              DateTime  @default(now()) @db.Timestamp(6)
+  updated_at              DateTime  @default(now()) @db.Timestamp(6)
+
+  coupon_usages coupon_usages[]
+
+  @@index([is_active])
+  @@index([expires_at])
+}
+
+model coupon_usages {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  coupon_id       String   @db.Uuid
+  user_id         String   @db.Uuid
+  order_id        String   @db.Uuid
+  discount_amount Decimal  @db.Decimal(12, 2)
+  created_at      DateTime @default(now()) @db.Timestamp(6)
+
+  coupons coupons @relation(fields: [coupon_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_coupon_usage_coupon")
+  users   users   @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_coupon_usage_user")
+  orders  orders  @relation(fields: [order_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_coupon_usage_order")
+
+  @@unique([coupon_id, user_id, order_id], map: "uq_coupon_usage")
+  @@index([coupon_id])
+  @@index([user_id])
+  @@index([order_id])
+}

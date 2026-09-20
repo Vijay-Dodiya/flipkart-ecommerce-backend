@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "order_status_history" ADD COLUMN     "reason" TEXT;
