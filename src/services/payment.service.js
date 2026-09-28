@@ -1,9 +1,11 @@
 import crypto from "crypto";
 
 import razorpay from "../config/razorpay.js";
+
 import prisma from "../config/prisma.js";
 
 import AppError from "../utils/AppError.js";
+
 import { createOrderStatusHistory } from "./orderStatusHistory.service.js";
 
 /*
@@ -14,24 +16,40 @@ import { createOrderStatusHistory } from "./orderStatusHistory.service.js";
 
 const PAYMENT_STATUS = {
   PENDING: "pending",
+
   PAID: "paid",
+
   FAILED: "failed",
+
   REFUNDED: "refunded",
 };
 
 const ORDER_STATUS = {
   PENDING: "pending",
+
   CONFIRMED: "confirmed",
+
   PROCESSING: "processing",
+
   SHIPPED: "shipped",
+
   DELIVERED: "delivered",
+
   CANCELLED: "cancelled",
 };
 
 const REFUND_STATUS = {
   PENDING: "pending",
+
   PROCESSED: "processed",
+
   FAILED: "failed",
+};
+
+const RETURN_STATUS = {
+  RECEIVED: "received",
+
+  REFUNDED: "refunded",
 };
 
 const RAZORPAY_CURRENCY = "INR";
@@ -127,15 +145,15 @@ const validatePaymentOrderRelationship = (payment, order) => {
 /**
  * Request a refund from Razorpay.
  *
- * Important:
  * This function only talks to Razorpay.
- * Database state changes should happen separately.
+ * Database state changes happen separately.
  */
-const requestRazorpayRefund = async (
+export const requestRazorpayRefund = async (
   paymentId,
   amountInPaise,
   orderId,
   reason = "Order cancelled by customer",
+  notes = {},
 ) => {
   try {
     const refund = await razorpay.payments.refund(paymentId, {
@@ -143,6 +161,7 @@ const requestRazorpayRefund = async (
       notes: {
         order_id: orderId,
         reason,
+        ...notes,
       },
     });
 
@@ -161,20 +180,30 @@ const requestRazorpayRefund = async (
 */
 
 /**
- * Restore inventory after a paid order is cancelled/refunded.
+ * Restore inventory after a paid order
+ * is cancelled/refunded.
  *
- * We increase quantity only.
+ * Normal product:
+ *     inventory.quantity += quantity
  *
- * reserved_quantity is NOT increased because successful payment
- * already converted reserved stock into sold stock.
+ * Variant:
+ *     variant_inventory.quantity += quantity
+ *
+ * reserved_quantity is NOT increased because
+ * successful payment already converted reserved
+ * stock into sold stock.
  */
 const restorePaidOrderInventory = async (tx, orderId) => {
   const items = await tx.order_items.findMany({
     where: {
       order_id: orderId,
     },
+
     select: {
       product_id: true,
+
+      variant_id: true,
+
       quantity: true,
     },
   });
@@ -184,14 +213,53 @@ const restorePaidOrderInventory = async (tx, orderId) => {
   }
 
   for (const item of items) {
+    /*
+        |--------------------------------------------------------------------------
+        | Variant inventory
+        |--------------------------------------------------------------------------
+        */
+
+    if (item.variant_id) {
+      const result = await tx.variant_inventory.updateMany({
+        where: {
+          variant_id: item.variant_id,
+        },
+
+        data: {
+          quantity: {
+            increment: item.quantity,
+          },
+
+          updated_at: new Date(),
+        },
+      });
+
+      if (result.count !== 1) {
+        throw new AppError(
+          `Variant inventory not found for variant ${item.variant_id}`,
+          500,
+        );
+      }
+
+      continue;
+    }
+
+    /*
+        |--------------------------------------------------------------------------
+        | Normal product inventory
+        |--------------------------------------------------------------------------
+        */
+
     const result = await tx.inventory.updateMany({
       where: {
         product_id: item.product_id,
       },
+
       data: {
         quantity: {
           increment: item.quantity,
         },
+
         updated_at: new Date(),
       },
     });
@@ -207,14 +275,24 @@ const restorePaidOrderInventory = async (tx, orderId) => {
 
 /**
  * Release reserved inventory for an unpaid order.
+ *
+ * Normal product:
+ *     inventory.reserved_quantity -= quantity
+ *
+ * Variant:
+ *     variant_inventory.reserved_quantity -= quantity
  */
 const releaseReservedInventory = async (tx, orderId) => {
   const items = await tx.order_items.findMany({
     where: {
       order_id: orderId,
     },
+
     select: {
       product_id: true,
+
+      variant_id: true,
+
       quantity: true,
     },
   });
@@ -224,17 +302,61 @@ const releaseReservedInventory = async (tx, orderId) => {
   }
 
   for (const item of items) {
+    /*
+        |--------------------------------------------------------------------------
+        | Variant inventory
+        |--------------------------------------------------------------------------
+        */
+
+    if (item.variant_id) {
+      const result = await tx.variant_inventory.updateMany({
+        where: {
+          variant_id: item.variant_id,
+
+          reserved_quantity: {
+            gte: item.quantity,
+          },
+        },
+
+        data: {
+          reserved_quantity: {
+            decrement: item.quantity,
+          },
+
+          updated_at: new Date(),
+        },
+      });
+
+      if (result.count !== 1) {
+        throw new AppError(
+          `Unable to release inventory for variant ${item.variant_id}`,
+          409,
+        );
+      }
+
+      continue;
+    }
+
+    /*
+        |--------------------------------------------------------------------------
+        | Normal product inventory
+        |--------------------------------------------------------------------------
+        */
+
     const result = await tx.inventory.updateMany({
       where: {
         product_id: item.product_id,
+
         reserved_quantity: {
           gte: item.quantity,
         },
       },
+
       data: {
         reserved_quantity: {
           decrement: item.quantity,
         },
+
         updated_at: new Date(),
       },
     });
@@ -266,8 +388,11 @@ const finalizeSuccessfulPayment = async (
   historyReason,
 ) => {
   /*
-   * Duplicate-safe check.
-   */
+    |--------------------------------------------------------------------------
+    | Duplicate-safe check
+    |--------------------------------------------------------------------------
+    */
+
   if (order.payment_status === PAYMENT_STATUS.PAID) {
     if (order.razorpay_payment_id && order.razorpay_payment_id !== paymentId) {
       throw new AppError("Order is already paid with another payment", 409);
@@ -275,6 +400,7 @@ const finalizeSuccessfulPayment = async (
 
     return {
       order,
+
       alreadyPaid: true,
     };
   }
@@ -284,19 +410,31 @@ const finalizeSuccessfulPayment = async (
   }
 
   /*
-   * A cancelled order should normally not reach this function.
-   * If it does, do not convert it into a paid order.
-   */
+    |--------------------------------------------------------------------------
+    | Cancelled order protection
+    |--------------------------------------------------------------------------
+    */
+
   if (order.status === ORDER_STATUS.CANCELLED) {
     throw new AppError("Cancelled order cannot be marked as paid", 409);
   }
+
+  /*
+    |--------------------------------------------------------------------------
+    | Load order items
+    |--------------------------------------------------------------------------
+    */
 
   const items = await tx.order_items.findMany({
     where: {
       order_id: order.id,
     },
+
     select: {
       product_id: true,
+
+      variant_id: true,
+
       quantity: true,
     },
   });
@@ -306,31 +444,99 @@ const finalizeSuccessfulPayment = async (
   }
 
   /*
-   * Convert reserved stock into sold stock.
-   *
-   * quantity decreases
-   * reserved_quantity decreases
-   *
-   * Both conditions are checked atomically.
-   */
+    |--------------------------------------------------------------------------
+    | Convert reserved stock into sold stock
+    |--------------------------------------------------------------------------
+    |
+    | Normal product:
+    |
+    | quantity            -= order quantity
+    | reserved_quantity   -= order quantity
+    |
+    |
+    | Variant:
+    |
+    | variant_inventory.quantity
+    |                     -= order quantity
+    |
+    | variant_inventory.reserved_quantity
+    |                     -= order quantity
+    |
+    |--------------------------------------------------------------------------
+    */
+
   for (const item of items) {
+    /*
+        |--------------------------------------------------------------------------
+        | Variant inventory
+        |--------------------------------------------------------------------------
+        */
+
+    if (item.variant_id) {
+      const result = await tx.variant_inventory.updateMany({
+        where: {
+          variant_id: item.variant_id,
+
+          quantity: {
+            gte: item.quantity,
+          },
+
+          reserved_quantity: {
+            gte: item.quantity,
+          },
+        },
+
+        data: {
+          quantity: {
+            decrement: item.quantity,
+          },
+
+          reserved_quantity: {
+            decrement: item.quantity,
+          },
+
+          updated_at: new Date(),
+        },
+      });
+
+      if (result.count !== 1) {
+        throw new AppError(
+          `Insufficient inventory for variant ${item.variant_id}`,
+          409,
+        );
+      }
+
+      continue;
+    }
+
+    /*
+        |--------------------------------------------------------------------------
+        | Normal product inventory
+        |--------------------------------------------------------------------------
+        */
+
     const result = await tx.inventory.updateMany({
       where: {
         product_id: item.product_id,
+
         quantity: {
           gte: item.quantity,
         },
+
         reserved_quantity: {
           gte: item.quantity,
         },
       },
+
       data: {
         quantity: {
           decrement: item.quantity,
         },
+
         reserved_quantity: {
           decrement: item.quantity,
         },
+
         updated_at: new Date(),
       },
     });
@@ -344,12 +550,16 @@ const finalizeSuccessfulPayment = async (
   }
 
   /*
-   * Mark order as paid and confirmed.
-   */
+    |--------------------------------------------------------------------------
+    | Mark order as paid and confirmed
+    |--------------------------------------------------------------------------
+    */
+
   const updatedOrder = await tx.orders.update({
     where: {
       id: order.id,
     },
+
     data: {
       payment_status: PAYMENT_STATUS.PAID,
 
@@ -364,18 +574,26 @@ const finalizeSuccessfulPayment = async (
   });
 
   /*
-   * Record status history.
-   */
+    |--------------------------------------------------------------------------
+    | Record status history
+    |--------------------------------------------------------------------------
+    */
+
   await createOrderStatusHistory(
     tx,
+
     order.id,
+
     ORDER_STATUS.CONFIRMED,
+
     null,
+
     historyReason,
   );
 
   return {
     order: updatedOrder,
+
     alreadyPaid: false,
   };
 };
@@ -418,16 +636,19 @@ export const createRazorpayOrder = async (userId, orderId) => {
   }
 
   /*
-   * Reuse existing Razorpay order.
-   *
-   * This prevents unnecessary duplicate Razorpay orders
-   * when the frontend retries the request.
-   */
+    |--------------------------------------------------------------------------
+    | Reuse existing Razorpay order
+    |--------------------------------------------------------------------------
+    */
+
   if (order.razorpay_order_id) {
     return {
       id: order.razorpay_order_id,
+
       amount: getAmountInPaise(order.total_amount),
+
       currency: RAZORPAY_CURRENCY,
+
       orderId: order.id,
     };
   }
@@ -443,10 +664,14 @@ export const createRazorpayOrder = async (userId, orderId) => {
   try {
     razorpayOrder = await razorpay.orders.create({
       amount: amountInPaise,
+
       currency: RAZORPAY_CURRENCY,
+
       receipt: order.id,
+
       notes: {
         order_id: order.id,
+
         user_id: userId,
       },
     });
@@ -460,16 +685,21 @@ export const createRazorpayOrder = async (userId, orderId) => {
     where: {
       id: order.id,
     },
+
     data: {
       razorpay_order_id: razorpayOrder.id,
+
       updated_at: new Date(),
     },
   });
 
   return {
     id: razorpayOrder.id,
+
     amount: razorpayOrder.amount,
+
     currency: razorpayOrder.currency,
+
     orderId: order.id,
   };
 };
@@ -520,13 +750,18 @@ export const verifyRazorpayPayment = async ({
   }
 
   /*
-   * Idempotent verification.
-   */
+    |--------------------------------------------------------------------------
+    | Idempotent verification
+    |--------------------------------------------------------------------------
+    */
+
   if (order.payment_status === PAYMENT_STATUS.PAID) {
     if (order.razorpay_payment_id === razorpayPaymentId) {
       return {
         success: true,
+
         alreadyPaid: true,
+
         order,
       };
     }
@@ -543,10 +778,14 @@ export const verifyRazorpayPayment = async ({
   }
 
   /*
-   * Verify HMAC signature.
-   */
+    |--------------------------------------------------------------------------
+    | Verify HMAC signature
+    |--------------------------------------------------------------------------
+    */
+
   const expectedSignature = generatePaymentSignature(
     razorpayOrderId,
+
     razorpayPaymentId,
   );
 
@@ -555,9 +794,11 @@ export const verifyRazorpayPayment = async ({
   }
 
   /*
-   * Never trust only frontend-provided payment information.
-   * Fetch the payment directly from Razorpay.
-   */
+    |--------------------------------------------------------------------------
+    | Fetch payment directly from Razorpay
+    |--------------------------------------------------------------------------
+    */
+
   let payment;
 
   try {
@@ -582,14 +823,19 @@ export const verifyRazorpayPayment = async ({
   }
 
   /*
-   * Lock the order before changing payment/inventory state.
-   */
+    |--------------------------------------------------------------------------
+    | Lock order and finalize payment
+    |--------------------------------------------------------------------------
+    */
+
   const result = await prisma.$transaction(async (tx) => {
     const lockedOrderRows = await tx.$queryRaw`
+
                         SELECT *
                         FROM orders
                         WHERE id = ${orderId}::uuid
                         FOR UPDATE
+
                     `;
 
     const lockedOrder = lockedOrderRows[0];
@@ -606,6 +852,7 @@ export const verifyRazorpayPayment = async ({
       if (lockedOrder.razorpay_payment_id === razorpayPaymentId) {
         return {
           order: lockedOrder,
+
           alreadyPaid: true,
         };
       }
@@ -623,17 +870,79 @@ export const verifyRazorpayPayment = async ({
 
     return finalizeSuccessfulPayment(
       tx,
+
       lockedOrder,
+
       razorpayPaymentId,
+
       "Payment captured successfully",
     );
   });
 
   return {
     success: true,
+
     alreadyPaid: result.alreadyPaid,
+
     order: result.order,
   };
+};
+
+const getRefundAmountInPaise = (refund) => {
+  const amount = Number(refund?.amount);
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new AppError("Invalid refund amount received from Razorpay", 400);
+  }
+
+  return Math.round(amount);
+};
+
+const validateReturnRefundWebhook = (returnRecord, refund) => {
+    const refundAmount = Number(returnRecord.refund_amount);
+
+    if (
+        !Number.isFinite(refundAmount) ||
+        refundAmount <= 0
+    ) {
+        throw new AppError(
+            "Invalid return refund amount",
+            400,
+        );
+    }
+
+    const expectedAmountInPaise =
+        Math.round(refundAmount * 100);
+
+    const actualAmountInPaise =
+        getRefundAmountInPaise(refund);
+
+    if (
+        actualAmountInPaise !==
+        expectedAmountInPaise
+    ) {
+        throw new AppError(
+            "Refund amount does not match the return refund amount",
+            400,
+        );
+    }
+
+    if (!returnRecord.orders?.razorpay_payment_id) {
+        throw new AppError(
+            "Return order payment ID is missing",
+            500,
+        );
+    }
+
+    if (
+        returnRecord.orders.razorpay_payment_id !==
+        refund.payment_id
+    ) {
+        throw new AppError(
+            "Refund payment does not belong to the return order",
+            400,
+        );
+    }
 };
 
 /*
@@ -643,540 +952,955 @@ export const verifyRazorpayPayment = async ({
 */
 
 export const handleRazorpayWebhook = async (
-  rawBody,
-  webhookSignature,
-  eventId,
+    rawBody,
+    webhookSignature,
+    eventId,
 ) => {
-  if (!rawBody) {
-    throw new AppError("Webhook body is required", 400);
-  }
-
-  if (!webhookSignature) {
-    throw new AppError("Webhook signature is required", 400);
-  }
-
-  if (!eventId) {
-    throw new AppError("Webhook event ID is required", 400);
-  }
-
-  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
-
-  if (!webhookSecret) {
-    throw new AppError("Razorpay webhook secret is not configured", 500);
-  }
-
-  /*
-   * Razorpay webhook signature must be calculated
-   * using the raw request body.
-   */
-  const expectedSignature = crypto
-    .createHmac("sha256", webhookSecret)
-    .update(rawBody)
-    .digest("hex");
-
-  if (!isValidSignature(expectedSignature, webhookSignature)) {
-    throw new AppError("Invalid webhook signature", 400);
-  }
-
-  let payload;
-
-  try {
-    payload = JSON.parse(rawBody.toString("utf8"));
-  } catch {
-    throw new AppError("Invalid webhook payload", 400);
-  }
-
-  const event = payload.event;
-
-  if (!event) {
-    throw new AppError("Webhook event is missing", 400);
-  }
-
-  const supportedEvents = [
-    "payment.captured",
-    "order.paid",
-    "payment.failed",
-    "refund.created",
-    "refund.processed",
-    "refund.failed",
-  ];
-
-  if (!supportedEvents.includes(event)) {
-    return {
-      success: true,
-      ignored: true,
-      message: `Unsupported webhook event: ${event}`,
-    };
-  }
-
-  /*
-   * Payment events.
-   */
-  if (
-    event === "payment.captured" ||
-    event === "order.paid" ||
-    event === "payment.failed"
-  ) {
-    const payment = payload?.payload?.payment?.entity;
-
-    if (!payment) {
-      throw new AppError("Payment entity missing from webhook", 400);
+    if (!rawBody) {
+        throw new AppError(
+            "Webhook body is required",
+            400,
+        );
     }
 
-    const paymentOrderId = payment.order_id;
-
-    if (!paymentOrderId) {
-      throw new AppError("Razorpay order ID missing from payment webhook", 400);
+    if (!webhookSignature) {
+        throw new AppError(
+            "Webhook signature is required",
+            400,
+        );
     }
 
-    return prisma.$transaction(async (tx) => {
-      /*
-       * Idempotency check.
-       */
-      const existingEvent = await tx.payment_webhook_events.findUnique({
-        where: {
-          event_id: eventId,
-        },
-      });
+    if (!eventId) {
+        throw new AppError(
+            "Webhook event ID is required",
+            400,
+        );
+    }
 
-      if (existingEvent) {
+    const webhookSecret =
+        process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    if (!webhookSecret) {
+        throw new AppError(
+            "Razorpay webhook secret is not configured",
+            500,
+        );
+    }
+
+    // ============================================================
+    // VERIFY WEBHOOK SIGNATURE
+    // ============================================================
+
+    const expectedSignature = crypto
+        .createHmac(
+            "sha256",
+            webhookSecret,
+        )
+        .update(rawBody)
+        .digest("hex");
+
+    if (
+        !isValidSignature(
+            expectedSignature,
+            webhookSignature,
+        )
+    ) {
+        throw new AppError(
+            "Invalid webhook signature",
+            400,
+        );
+    }
+
+    // ============================================================
+    // PARSE PAYLOAD
+    // ============================================================
+
+    let payload;
+
+    try {
+        payload = JSON.parse(
+            rawBody.toString("utf8"),
+        );
+    } catch {
+        throw new AppError(
+            "Invalid webhook payload",
+            400,
+        );
+    }
+
+    const event = payload.event;
+
+    if (!event) {
+        throw new AppError(
+            "Webhook event is missing",
+            400,
+        );
+    }
+
+    const supportedEvents = [
+        "payment.captured",
+        "order.paid",
+        "payment.failed",
+        "refund.created",
+        "refund.processed",
+        "refund.failed",
+    ];
+
+    if (!supportedEvents.includes(event)) {
         return {
-          success: true,
-          duplicate: true,
+            success: true,
+            ignored: true,
+            message: `Unsupported webhook event: ${event}`,
         };
-      }
+    }
 
-      /*
-       * Lock order.
-       */
-      const orderRows = await tx.$queryRaw`
+    // ============================================================
+    // PAYMENT WEBHOOKS
+    // ============================================================
+
+    if (
+        event === "payment.captured" ||
+        event === "order.paid" ||
+        event === "payment.failed"
+    ) {
+        const payment =
+            payload?.payload?.payment?.entity;
+
+        if (!payment) {
+            throw new AppError(
+                "Payment entity missing from webhook",
+                400,
+            );
+        }
+
+        const paymentOrderId =
+            payment.order_id;
+
+        if (!paymentOrderId) {
+            throw new AppError(
+                "Razorpay order ID missing from payment webhook",
+                400,
+            );
+        }
+
+        return prisma.$transaction(
+            async (tx) => {
+                // ====================================================
+                // IDEMPOTENCY
+                // ====================================================
+
+                const existingEvent =
+                    await tx.payment_webhook_events.findUnique(
+                        {
+                            where: {
+                                event_id: eventId,
+                            },
+                        },
+                    );
+
+                if (existingEvent) {
+                    return {
+                        success: true,
+                        duplicate: true,
+                    };
+                }
+
+                // ====================================================
+                // LOCK ORDER
+                // ====================================================
+
+                const orderRows =
+                    await tx.$queryRaw`
                         SELECT *
                         FROM orders
                         WHERE razorpay_order_id = ${paymentOrderId}
                         FOR UPDATE
                     `;
 
-      const order = orderRows[0];
+                const order = orderRows[0];
 
-      if (!order) {
-        /*
-         * Store the event so Razorpay retries do not
-         * repeatedly process the same unknown event.
-         */
-        await tx.payment_webhook_events.create({
-          data: {
-            event_id: eventId,
-            event,
-          },
-        });
+                if (!order) {
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id: eventId,
+                                event,
+                            },
+                        },
+                    );
 
-        return {
-          success: true,
-          ignored: true,
-          message: "Order not found for webhook",
-        };
-      }
+                    return {
+                        success: true,
+                        ignored: true,
+                        message:
+                            "Order not found for webhook",
+                    };
+                }
 
-      /*
-       * Payment failed.
-       */
-      if (event === "payment.failed") {
-        await tx.payment_webhook_events.create({
-          data: {
-            event_id: eventId,
-            event,
-          },
-        });
+                // ====================================================
+                // PAYMENT FAILED
+                // ====================================================
 
-        /*
-         * Do not move an already paid/refunded order
-         * backward.
-         */
-        if (
-          order.payment_status === PAYMENT_STATUS.PAID ||
-          order.payment_status === PAYMENT_STATUS.REFUNDED
-        ) {
-          return {
-            success: true,
-            ignored: true,
-          };
-        }
+                if (
+                    event ===
+                    "payment.failed"
+                ) {
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id: eventId,
+                                event,
+                            },
+                        },
+                    );
 
-        /*
-         * If order was cancelled, release of reserved
-         * stock should already have happened through
-         * cancellation flow.
-         */
-        if (order.status === ORDER_STATUS.CANCELLED) {
-          return {
-            success: true,
-            ignored: true,
-          };
-        }
+                    if (
+                        order.payment_status ===
+                            PAYMENT_STATUS.PAID ||
+                        order.payment_status ===
+                            PAYMENT_STATUS.REFUNDED
+                    ) {
+                        return {
+                            success: true,
+                            ignored: true,
+                        };
+                    }
 
-        await tx.orders.update({
-          where: {
-            id: order.id,
-          },
-          data: {
-            payment_status: PAYMENT_STATUS.FAILED,
-            updated_at: new Date(),
-          },
-        });
+                    if (
+                        order.status ===
+                        ORDER_STATUS.CANCELLED
+                    ) {
+                        return {
+                            success: true,
+                            ignored: true,
+                        };
+                    }
 
-        return {
-          success: true,
-          paymentStatus: PAYMENT_STATUS.FAILED,
-        };
-      }
+                    await tx.orders.update(
+                        {
+                            where: {
+                                id: order.id,
+                            },
+                            data: {
+                                payment_status:
+                                    PAYMENT_STATUS.FAILED,
+                                updated_at:
+                                    new Date(),
+                            },
+                        },
+                    );
 
-      /*
-       * Captured/order.paid validation.
-       */
-      if (payment.status !== "captured") {
-        await tx.payment_webhook_events.create({
-          data: {
-            event_id: eventId,
-            event,
-          },
-        });
+                    return {
+                        success: true,
+                        paymentStatus:
+                            PAYMENT_STATUS.FAILED,
+                    };
+                }
 
-        return {
-          success: true,
-          ignored: true,
-          message: "Payment is not captured",
-        };
-      }
+                // ====================================================
+                // CAPTURED / ORDER.PAID VALIDATION
+                // ====================================================
 
-      validatePaymentOrderRelationship(payment, order);
+                if (
+                    payment.status !==
+                    "captured"
+                ) {
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id: eventId,
+                                event,
+                            },
+                        },
+                    );
 
-      /*
-       * If order is already cancelled and payment arrives
-       * later, we must refund it rather than mark it paid.
-       *
-       * NOTE:
-       * Calling Razorpay inside a DB transaction is not ideal
-       * for high-scale production. For this project, we keep
-       * the flow atomic from the application's perspective.
-       */
-      if (
-        order.status === ORDER_STATUS.CANCELLED &&
-        order.payment_status !== PAYMENT_STATUS.PAID &&
-        order.payment_status !== PAYMENT_STATUS.REFUNDED
-      ) {
-        const amountInPaise = getAmountInPaise(order.total_amount);
+                    return {
+                        success: true,
+                        ignored: true,
+                        message:
+                            "Payment is not captured",
+                    };
+                }
 
-        let refund;
+                validatePaymentOrderRelationship(
+                    payment,
+                    order,
+                );
 
-        try {
-          refund = await requestRazorpayRefund(
-            payment.id,
-            amountInPaise,
-            order.id,
-            "Payment received after order cancellation",
-          );
-        } catch (error) {
-          /*
-           * Record webhook before throwing so the event
-           * is not accidentally treated as unprocessed.
-           */
-          await tx.payment_webhook_events.create({
-            data: {
-              event_id: eventId,
-              event,
+                // ====================================================
+                // PAYMENT ARRIVES AFTER CANCELLATION
+                // ====================================================
+
+                if (
+                    order.status ===
+                        ORDER_STATUS.CANCELLED &&
+                    order.payment_status !==
+                        PAYMENT_STATUS.PAID &&
+                    order.payment_status !==
+                        PAYMENT_STATUS.REFUNDED
+                ) {
+                    const amountInPaise =
+                        getAmountInPaise(
+                            order.total_amount,
+                        );
+
+                    let refund;
+
+                    try {
+                        refund =
+                            await requestRazorpayRefund(
+                                payment.id,
+                                amountInPaise,
+                                order.id,
+                                "Payment received after order cancellation",
+                            );
+                    } catch (error) {
+                        await tx.payment_webhook_events.create(
+                            {
+                                data: {
+                                    event_id:
+                                        eventId,
+                                    event,
+                                },
+                            },
+                        );
+
+                        throw error;
+                    }
+
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id: eventId,
+                                event,
+                            },
+                        },
+                    );
+
+                    const immediateRefundProcessed =
+                        refund.status ===
+                        "processed";
+
+                    await tx.orders.update(
+                        {
+                            where: {
+                                id: order.id,
+                            },
+                            data: {
+                                payment_status:
+                                    immediateRefundProcessed
+                                        ? PAYMENT_STATUS.REFUNDED
+                                        : PAYMENT_STATUS.PAID,
+
+                                refund_status:
+                                    immediateRefundProcessed
+                                        ? REFUND_STATUS.PROCESSED
+                                        : REFUND_STATUS.PENDING,
+
+                                razorpay_payment_id:
+                                    payment.id,
+
+                                razorpay_refund_id:
+                                    refund.id,
+
+                                refunded_at:
+                                    immediateRefundProcessed
+                                        ? new Date()
+                                        : null,
+
+                                updated_at:
+                                    new Date(),
+                            },
+                        },
+                    );
+
+                    return {
+                        success: true,
+                        refunded: true,
+                        refundId:
+                            refund.id,
+                        refundStatus:
+                            refund.status,
+                    };
+                }
+
+                // ====================================================
+                // ALREADY PAID
+                // ====================================================
+
+                if (
+                    order.payment_status ===
+                    PAYMENT_STATUS.PAID
+                ) {
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id: eventId,
+                                event,
+                            },
+                        },
+                    );
+
+                    return {
+                        success: true,
+                        alreadyPaid: true,
+                    };
+                }
+
+                // ====================================================
+                // ALREADY REFUNDED
+                // ====================================================
+
+                if (
+                    order.payment_status ===
+                    PAYMENT_STATUS.REFUNDED
+                ) {
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id: eventId,
+                                event,
+                            },
+                        },
+                    );
+
+                    return {
+                        success: true,
+                        alreadyRefunded: true,
+                    };
+                }
+
+                // ====================================================
+                // MARK WEBHOOK AS PROCESSED
+                // ====================================================
+
+                await tx.payment_webhook_events.create(
+                    {
+                        data: {
+                            event_id: eventId,
+                            event,
+                        },
+                    },
+                );
+
+                const result =
+                    await finalizeSuccessfulPayment(
+                        tx,
+                        order,
+                        payment.id,
+                        "Payment captured successfully via Razorpay webhook",
+                    );
+
+                return {
+                    success: true,
+                    order: result.order,
+                    alreadyPaid:
+                        result.alreadyPaid,
+                };
             },
-          });
+        );
+    }
 
-          throw error;
+    // ============================================================
+    // REFUND WEBHOOKS
+    // ============================================================
+
+    if (
+        event === "refund.created" ||
+        event === "refund.processed" ||
+        event === "refund.failed"
+    ) {
+        const refund =
+            payload?.payload?.refund?.entity;
+
+        if (!refund) {
+            throw new AppError(
+                "Refund entity missing from webhook",
+                400,
+            );
         }
 
-        await tx.payment_webhook_events.create({
-          data: {
-            event_id: eventId,
-            event,
-          },
-        });
+        const paymentId =
+            refund.payment_id;
 
-        const immediateRefundProcessed = refund.status === "processed";
+        if (!paymentId) {
+            throw new AppError(
+                "Payment ID missing from refund webhook",
+                400,
+            );
+        }
 
-        await tx.orders.update({
-          where: {
-            id: order.id,
-          },
-          data: {
-            payment_status: immediateRefundProcessed
-              ? PAYMENT_STATUS.REFUNDED
-              : PAYMENT_STATUS.PAID,
+        const returnId =
+            refund?.notes?.return_id;
 
-            refund_status: immediateRefundProcessed
-              ? REFUND_STATUS.PROCESSED
-              : REFUND_STATUS.PENDING,
+        return prisma.$transaction(
+            async (tx) => {
+                // ====================================================
+                // IDEMPOTENCY
+                // ====================================================
 
-            razorpay_payment_id: payment.id,
+                const existingEvent =
+                    await tx.payment_webhook_events.findUnique(
+                        {
+                            where: {
+                                event_id: eventId,
+                            },
+                        },
+                    );
 
-            razorpay_refund_id: refund.id,
+                if (existingEvent) {
+                    return {
+                        success: true,
+                        duplicate: true,
+                    };
+                }
 
-            refunded_at: immediateRefundProcessed ? new Date() : null,
+                // ====================================================
+                // RETURN REFUND
+                // ====================================================
 
-            updated_at: new Date(),
-          },
-        });
+                if (returnId) {
+                    let returnRecord =
+                        await tx.returns.findUnique(
+                            {
+                                where: {
+                                    id: returnId,
+                                },
+                                include: {
+                                    orders: true,
+                                },
+                            },
+                        );
 
-        return {
-          success: true,
-          refunded: true,
-          refundId: refund.id,
-          refundStatus: refund.status,
-        };
-      }
+                    // ------------------------------------------------
+                    // FALLBACK: FIND BY RAZORPAY REFUND ID
+                    // ------------------------------------------------
 
-      /*
-       * Already paid/refunded.
-       */
-      if (order.payment_status === PAYMENT_STATUS.PAID) {
-        await tx.payment_webhook_events.create({
-          data: {
-            event_id: eventId,
-            event,
-          },
-        });
+                    if (
+                        !returnRecord &&
+                        refund.id
+                    ) {
+                        returnRecord =
+                            await tx.returns.findUnique(
+                                {
+                                    where: {
+                                        razorpay_refund_id:
+                                            refund.id,
+                                    },
+                                    include: {
+                                        orders: true,
+                                    },
+                                },
+                            );
+                    }
 
-        return {
-          success: true,
-          alreadyPaid: true,
-        };
-      }
+                    if (!returnRecord) {
+                        await tx.payment_webhook_events.create(
+                            {
+                                data: {
+                                    event_id:
+                                        eventId,
+                                    event,
+                                },
+                            },
+                        );
 
-      if (order.payment_status === PAYMENT_STATUS.REFUNDED) {
-        await tx.payment_webhook_events.create({
-          data: {
-            event_id: eventId,
-            event,
-          },
-        });
+                        return {
+                            success: true,
+                            ignored: true,
+                            message:
+                                "Return not found for refund webhook",
+                        };
+                    }
 
-        return {
-          success: true,
-          alreadyRefunded: true,
-        };
-      }
+                    // ------------------------------------------------
+                    // VERIFY PAYMENT RELATIONSHIP
+                    // ------------------------------------------------
 
-      /*
-       * Mark event as processed before state mutation.
-       */
-      await tx.payment_webhook_events.create({
-        data: {
-          event_id: eventId,
-          event,
-        },
-      });
+                    if (
+                        returnRecord.orders
+                            ?.razorpay_payment_id !==
+                        paymentId
+                    ) {
+                        throw new AppError(
+                            "Refund payment does not belong to return order",
+                            400,
+                        );
+                    }
 
-      const result = await finalizeSuccessfulPayment(
-        tx,
-        order,
-        payment.id,
-        "Payment captured successfully via Razorpay webhook",
-      );
+                    // ------------------------------------------------
+                    // VERIFY REFUND AMOUNT
+                    // ------------------------------------------------
 
-      return {
-        success: true,
-        order: result.order,
-        alreadyPaid: result.alreadyPaid,
-      };
-    });
-  }
+                    validateReturnRefundWebhook(
+                        returnRecord,
+                        refund,
+                    );
 
-  /*
-    |--------------------------------------------------------------------------
-    | Refund Webhooks
-    |--------------------------------------------------------------------------
-    */
+                    // ------------------------------------------------
+                    // RECORD WEBHOOK
+                    // ------------------------------------------------
 
-  if (
-    event === "refund.created" ||
-    event === "refund.processed" ||
-    event === "refund.failed"
-  ) {
-    const refund = payload?.payload?.refund?.entity;
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id:
+                                    eventId,
+                                event,
+                            },
+                        },
+                    );
 
-    if (!refund) {
-      throw new AppError("Refund entity missing from webhook", 400);
-    }
+                    // =================================================
+                    // REFUND CREATED
+                    // =================================================
 
-    const paymentId = refund.payment_id;
+                    if (
+                        event ===
+                        "refund.created"
+                    ) {
+                        if (
+                            returnRecord.status ===
+                            RETURN_STATUS.REFUNDED
+                        ) {
+                            return {
+                                success: true,
+                                alreadyRefunded:
+                                    true,
+                            };
+                        }
 
-    if (!paymentId) {
-      throw new AppError("Payment ID missing from refund webhook", 400);
-    }
+                        const updatedReturn =
+                            await tx.returns.update(
+                                {
+                                    where: {
+                                        id: returnRecord.id,
+                                    },
+                                    data: {
+                                        razorpay_refund_id:
+                                            refund.id,
 
-    return prisma.$transaction(async (tx) => {
-      /*
-       * Idempotency.
-       */
-      const existingEvent = await tx.payment_webhook_events.findUnique({
-        where: {
-          event_id: eventId,
-        },
-      });
+                                        status:
+                                            RETURN_STATUS.RECEIVED,
 
-      if (existingEvent) {
-        return {
-          success: true,
-          duplicate: true,
-        };
-      }
+                                        updated_at:
+                                            new Date(),
+                                    },
+                                },
+                            );
 
-      const orderRows = await tx.$queryRaw`
+                        return {
+                            success: true,
+                            return:
+                                updatedReturn,
+                            refundStatus:
+                                REFUND_STATUS.PENDING,
+                        };
+                    }
+
+                    // =================================================
+                    // REFUND PROCESSED
+                    // =================================================
+
+                    if (
+                        event ===
+                        "refund.processed"
+                    ) {
+                        if (
+                            returnRecord.status ===
+                            RETURN_STATUS.REFUNDED
+                        ) {
+                            return {
+                                success: true,
+                                alreadyRefunded:
+                                    true,
+                            };
+                        }
+
+                        const updatedReturn =
+                            await tx.returns.update(
+                                {
+                                    where: {
+                                        id: returnRecord.id,
+                                    },
+                                    data: {
+                                        status:
+                                            RETURN_STATUS.REFUNDED,
+
+                                        razorpay_refund_id:
+                                            refund.id,
+
+                                        refunded_at:
+                                            returnRecord.refunded_at ??
+                                            new Date(),
+
+                                        updated_at:
+                                            new Date(),
+                                    },
+                                },
+                            );
+
+                        return {
+                            success: true,
+                            return:
+                                updatedReturn,
+
+                            refundStatus:
+                                REFUND_STATUS.PROCESSED,
+                        };
+                    }
+
+                    // =================================================
+                    // REFUND FAILED
+                    // =================================================
+
+                    if (
+                        event ===
+                        "refund.failed"
+                    ) {
+                        const updatedReturn =
+                            await tx.returns.update(
+                                {
+                                    where: {
+                                        id: returnRecord.id,
+                                    },
+                                    data: {
+                                        status:
+                                            RETURN_STATUS.RECEIVED,
+
+                                        razorpay_refund_id:
+                                            null,
+
+                                        refunded_at:
+                                            null,
+
+                                        updated_at:
+                                            new Date(),
+                                    },
+                                },
+                            );
+
+                        return {
+                            success: true,
+                            return:
+                                updatedReturn,
+
+                            refundStatus:
+                                REFUND_STATUS.FAILED,
+                        };
+                    }
+                }
+
+                // ====================================================
+                // NORMAL ORDER REFUND
+                // ====================================================
+
+                const orderRows =
+                    await tx.$queryRaw`
                         SELECT *
                         FROM orders
                         WHERE razorpay_payment_id = ${paymentId}
                         FOR UPDATE
                     `;
 
-      const order = orderRows[0];
+                const order =
+                    orderRows[0];
 
-      /*
-       * Record unknown refund event.
-       */
-      if (!order) {
-        await tx.payment_webhook_events.create({
-          data: {
-            event_id: eventId,
-            event,
-          },
-        });
+                if (!order) {
+                    await tx.payment_webhook_events.create(
+                        {
+                            data: {
+                                event_id:
+                                    eventId,
+                                event,
+                            },
+                        },
+                    );
 
-        return {
-          success: true,
-          ignored: true,
-        };
-      }
+                    return {
+                        success: true,
+                        ignored: true,
+                        message:
+                            "Order not found for refund webhook",
+                    };
+                }
 
-      const refundAmount = Number(refund.amount);
+                // ------------------------------------------------
+                // NORMAL ORDER REFUND MUST BE FULL REFUND
+                // ------------------------------------------------
 
-      const orderAmount = getAmountInPaise(order.total_amount);
+                const refundAmount =
+                    Number(refund.amount);
 
-      /*
-       * For this project we only support full refunds.
-       */
-      if (refundAmount !== orderAmount) {
-        throw new AppError(
-          "Partial refunds are not supported for this order",
-          400,
+                const orderAmount =
+                    getAmountInPaise(
+                        order.total_amount,
+                    );
+
+                if (
+                    refundAmount !==
+                    orderAmount
+                ) {
+                    throw new AppError(
+                        "Invalid partial refund for normal order cancellation",
+                        400,
+                    );
+                }
+
+                await tx.payment_webhook_events.create(
+                    {
+                        data: {
+                            event_id: eventId,
+                            event,
+                        },
+                    },
+                );
+
+                // =================================================
+                // REFUND CREATED
+                // =================================================
+
+                if (
+                    event ===
+                    "refund.created"
+                ) {
+                    if (
+                        order.refund_status ===
+                        REFUND_STATUS.PROCESSED
+                    ) {
+                        return {
+                            success: true,
+                            ignored: true,
+                        };
+                    }
+
+                    await tx.orders.update(
+                        {
+                            where: {
+                                id: order.id,
+                            },
+                            data: {
+                                refund_status:
+                                    REFUND_STATUS.PENDING,
+
+                                razorpay_refund_id:
+                                    refund.id,
+
+                                updated_at:
+                                    new Date(),
+                            },
+                        },
+                    );
+
+                    return {
+                        success: true,
+                        refundStatus:
+                            REFUND_STATUS.PENDING,
+                    };
+                }
+
+                // =================================================
+                // REFUND PROCESSED
+                // =================================================
+
+                if (
+                    event ===
+                    "refund.processed"
+                ) {
+                    if (
+                        order.refund_status ===
+                        REFUND_STATUS.PROCESSED
+                    ) {
+                        return {
+                            success: true,
+                            alreadyProcessed:
+                                true,
+                        };
+                    }
+
+                    await tx.orders.update(
+                        {
+                            where: {
+                                id: order.id,
+                            },
+                            data: {
+                                payment_status:
+                                    PAYMENT_STATUS.REFUNDED,
+
+                                refund_status:
+                                    REFUND_STATUS.PROCESSED,
+
+                                razorpay_refund_id:
+                                    refund.id,
+
+                                refunded_at:
+                                    order.refunded_at ??
+                                    new Date(),
+
+                                updated_at:
+                                    new Date(),
+                            },
+                        },
+                    );
+
+                    return {
+                        success: true,
+                        paymentStatus:
+                            PAYMENT_STATUS.REFUNDED,
+
+                        refundStatus:
+                            REFUND_STATUS.PROCESSED,
+                    };
+                }
+
+                // =================================================
+                // REFUND FAILED
+                // =================================================
+
+                if (
+                    event ===
+                    "refund.failed"
+                ) {
+                    await tx.orders.update(
+                        {
+                            where: {
+                                id: order.id,
+                            },
+                            data: {
+                                refund_status:
+                                    REFUND_STATUS.FAILED,
+
+                                razorpay_refund_id:
+                                    refund.id,
+
+                                updated_at:
+                                    new Date(),
+                            },
+                        },
+                    );
+
+                    return {
+                        success: true,
+                        refundStatus:
+                            REFUND_STATUS.FAILED,
+                    };
+                }
+
+                return {
+                    success: true,
+                };
+            },
         );
-      }
+    }
 
-      await tx.payment_webhook_events.create({
-        data: {
-          event_id: eventId,
-          event,
-        },
-      });
+    // ============================================================
+    // UNSUPPORTED / FALLBACK
+    // ============================================================
 
-      /*
-       * Refund created.
-       */
-      if (event === "refund.created") {
-        if (order.refund_status === REFUND_STATUS.PROCESSED) {
-          return {
-            success: true,
-            ignored: true,
-          };
-        }
-
-        await tx.orders.update({
-          where: {
-            id: order.id,
-          },
-          data: {
-            refund_status: REFUND_STATUS.PENDING,
-
-            razorpay_refund_id: refund.id,
-
-            updated_at: new Date(),
-          },
-        });
-
-        return {
-          success: true,
-          refundStatus: REFUND_STATUS.PENDING,
-        };
-      }
-
-      /*
-       * Refund processed.
-       */
-      if (event === "refund.processed") {
-        /*
-         * If already processed, do not restore inventory again.
-         */
-        if (order.refund_status === REFUND_STATUS.PROCESSED) {
-          return {
-            success: true,
-            alreadyProcessed: true,
-          };
-        }
-
-        await tx.orders.update({
-          where: {
-            id: order.id,
-          },
-          data: {
-            payment_status: PAYMENT_STATUS.REFUNDED,
-
-            refund_status: REFUND_STATUS.PROCESSED,
-
-            razorpay_refund_id: refund.id,
-
-            refunded_at: order.refunded_at || new Date(),
-
-            updated_at: new Date(),
-          },
-        });
-
-        return {
-          success: true,
-          paymentStatus: PAYMENT_STATUS.REFUNDED,
-
-          refundStatus: REFUND_STATUS.PROCESSED,
-        };
-      }
-
-      /*
-       * Refund failed.
-       *
-       * Do NOT change paid -> refunded.
-       */
-      if (event === "refund.failed") {
-        await tx.orders.update({
-          where: {
-            id: order.id,
-          },
-          data: {
-            refund_status: REFUND_STATUS.FAILED,
-
-            razorpay_refund_id: refund.id,
-
-            updated_at: new Date(),
-          },
-        });
-
-        return {
-          success: true,
-          refundStatus: REFUND_STATUS.FAILED,
-        };
-      }
-
-      return {
+    return {
         success: true,
-      };
-    });
-  }
-
-  return {
-    success: true,
-    ignored: true,
-  };
+        ignored: true,
+    };
 };
 
 /*
@@ -1191,8 +1915,11 @@ export const cancelPaidOrder = async (userId, orderId) => {
   }
 
   /*
-   * First lock the order and validate its current state.
-   */
+    |--------------------------------------------------------------------------
+    | Load order
+    |--------------------------------------------------------------------------
+    */
+
   const order = await prisma.orders.findUnique({
     where: {
       id: orderId,
@@ -1209,8 +1936,11 @@ export const cancelPaidOrder = async (userId, orderId) => {
 
   if (order.status === ORDER_STATUS.CANCELLED) {
     /*
-     * Allow retry when previous refund failed.
-     */
+        |--------------------------------------------------------------------------
+        | Allow retry when previous refund failed
+        |--------------------------------------------------------------------------
+        */
+
     if (
       order.payment_status === PAYMENT_STATUS.PAID &&
       order.refund_status === REFUND_STATUS.FAILED
@@ -1244,8 +1974,11 @@ export const cancelPaidOrder = async (userId, orderId) => {
   }
 
   /*
-   * Fetch payment from Razorpay before refund.
-   */
+    |--------------------------------------------------------------------------
+    | Fetch payment from Razorpay
+    |--------------------------------------------------------------------------
+    */
+
   let payment;
 
   try {
@@ -1259,18 +1992,19 @@ export const cancelPaidOrder = async (userId, orderId) => {
   validatePaymentOrderRelationship(payment, order);
 
   /*
-   * Already refunded externally.
-   *
-   * We still need to make local state consistent.
-   */
+    |--------------------------------------------------------------------------
+    | Already refunded externally
+    |--------------------------------------------------------------------------
+    */
+
   if (payment.status === "refunded") {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const lockedRows = await tx.$queryRaw`
-                        SELECT *
-                        FROM orders
-                        WHERE id = ${orderId}::uuid
-                        FOR UPDATE
-                    `;
+            SELECT *
+            FROM orders
+            WHERE id = ${orderId}::uuid
+            FOR UPDATE
+        `;
 
       const lockedOrder = lockedRows[0];
 
@@ -1278,10 +2012,55 @@ export const cancelPaidOrder = async (userId, orderId) => {
         throw new AppError("Order not found", 404);
       }
 
-      if (lockedOrder.status === ORDER_STATUS.CANCELLED) {
-        return lockedOrder;
+      if (lockedOrder.user_id !== userId) {
+        throw new AppError("You are not authorized to retry this refund.", 403);
       }
 
+      /*
+       * If the order was already cancelled, inventory
+       * was already restored during the original
+       * cancellation flow.
+       *
+       * Therefore, only reconcile the local payment
+       * and refund state.
+       */
+      if (lockedOrder.status === ORDER_STATUS.CANCELLED) {
+        const updatedOrder = await tx.orders.update({
+          where: {
+            id: orderId,
+          },
+          data: {
+            payment_status: PAYMENT_STATUS.REFUNDED,
+
+            refund_status: REFUND_STATUS.PROCESSED,
+
+            refunded_at: lockedOrder.refunded_at || new Date(),
+
+            updated_at: new Date(),
+          },
+        });
+
+        await createOrderStatusHistory(
+          tx,
+          orderId,
+          ORDER_STATUS.CANCELLED,
+          userId,
+          "Refund was already processed by Razorpay and the local order state was reconciled",
+        );
+
+        return updatedOrder;
+      }
+
+      /*
+       * --------------------------------------------------------------------------
+       * Restore inventory
+       * --------------------------------------------------------------------------
+       *
+       * Razorpay has already processed the refund, but the
+       * local order has not been cancelled yet.
+       *
+       * Restore the inventory before cancelling the order.
+       */
       await restorePaidOrderInventory(tx, orderId);
 
       const updatedOrder = await tx.orders.update({
@@ -1313,6 +2092,13 @@ export const cancelPaidOrder = async (userId, orderId) => {
 
       return updatedOrder;
     });
+
+    return {
+      success: true,
+      message:
+        "Payment was already refunded by Razorpay. Local order state has been reconciled.",
+      order: result,
+    };
   }
 
   if (payment.status !== "captured") {
@@ -1325,27 +2111,37 @@ export const cancelPaidOrder = async (userId, orderId) => {
   const amountInPaise = getAmountInPaise(order.total_amount);
 
   /*
-   * Request Razorpay refund BEFORE marking local order
-   * as cancelled/refunded.
-   */
+    |--------------------------------------------------------------------------
+    | Request Razorpay refund before local mutation
+    |--------------------------------------------------------------------------
+    */
+
   const refund = await requestRazorpayRefund(
     order.razorpay_payment_id,
+
     amountInPaise,
+
     order.id,
+
     "Customer cancelled the order",
   );
 
   const immediateRefundProcessed = refund.status === "processed";
 
   /*
-   * Now update local database under lock.
-   */
+    |--------------------------------------------------------------------------
+    | Update local database
+    |--------------------------------------------------------------------------
+    */
+
   return prisma.$transaction(async (tx) => {
     const lockedRows = await tx.$queryRaw`
+
                     SELECT *
                     FROM orders
                     WHERE id = ${orderId}::uuid
                     FOR UPDATE
+
                 `;
 
     const lockedOrder = lockedRows[0];
@@ -1355,22 +2151,28 @@ export const cancelPaidOrder = async (userId, orderId) => {
     }
 
     /*
-     * Another request may have completed cancellation
-     * while Razorpay refund was being processed.
-     */
+            |--------------------------------------------------------------------------
+            | Another request may have completed cancellation
+            |--------------------------------------------------------------------------
+            */
+
     if (lockedOrder.status === ORDER_STATUS.CANCELLED) {
       return lockedOrder;
     }
 
     /*
-     * Restore inventory exactly once.
-     */
+            |--------------------------------------------------------------------------
+            | Restore inventory exactly once
+            |--------------------------------------------------------------------------
+            */
+
     await restorePaidOrderInventory(tx, orderId);
 
     const updatedOrder = await tx.orders.update({
       where: {
         id: orderId,
       },
+
       data: {
         status: ORDER_STATUS.CANCELLED,
 
@@ -1394,9 +2196,13 @@ export const cancelPaidOrder = async (userId, orderId) => {
 
     await createOrderStatusHistory(
       tx,
+
       orderId,
+
       ORDER_STATUS.CANCELLED,
+
       userId,
+
       immediateRefundProcessed
         ? "Customer cancelled the order and refund was processed"
         : "Customer cancelled the order and refund was initiated",
@@ -1446,8 +2252,11 @@ const retryPaidOrderRefund = async (userId, orderId) => {
   const amountInPaise = getAmountInPaise(order.total_amount);
 
   /*
-   * Check Razorpay payment.
+   * --------------------------------------------------------------------------
+   * Check Razorpay payment
+   * --------------------------------------------------------------------------
    */
+
   let payment;
 
   try {
@@ -1459,16 +2268,30 @@ const retryPaidOrderRefund = async (userId, orderId) => {
   }
 
   /*
-   * If already refunded externally, synchronize local state.
+   * --------------------------------------------------------------------------
+   * Already refunded externally
+   * --------------------------------------------------------------------------
+   *
+   * The order is already cancelled.
+   *
+   * Inventory was already restored during the original
+   * cancelPaidOrder() flow.
+   *
+   * Therefore, we ONLY reconcile the local payment/refund
+   * state here.
+   *
+   * We must NOT call restorePaidOrderInventory() again.
+   * Otherwise, stock could be restored twice.
    */
+
   if (payment.status === "refunded") {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const lockedRows = await tx.$queryRaw`
-                        SELECT *
-                        FROM orders
-                        WHERE id = ${orderId}::uuid
-                        FOR UPDATE
-                    `;
+                    SELECT *
+                    FROM orders
+                    WHERE id = ${orderId}::uuid
+                    FOR UPDATE
+                `;
 
       const lockedOrder = lockedRows[0];
 
@@ -1476,9 +2299,40 @@ const retryPaidOrderRefund = async (userId, orderId) => {
         throw new AppError("Order not found", 404);
       }
 
-      if (lockedOrder.payment_status === PAYMENT_STATUS.REFUNDED) {
+      if (lockedOrder.user_id !== userId) {
+        throw new AppError("You are not authorized to retry this refund.", 403);
+      }
+
+      /*
+       * The order must already be cancelled because this
+       * function is only called for a failed refund retry.
+       */
+
+      if (lockedOrder.status !== ORDER_STATUS.CANCELLED) {
+        throw new AppError("Only cancelled orders can retry a refund.", 409);
+      }
+
+      /*
+       * If the local state was already reconciled by
+       * another request/webhook, do not perform the
+       * operation again.
+       */
+
+      if (
+        lockedOrder.payment_status === PAYMENT_STATUS.REFUNDED &&
+        lockedOrder.refund_status === REFUND_STATUS.PROCESSED
+      ) {
         return lockedOrder;
       }
+
+      /*
+       * IMPORTANT:
+       *
+       * Do NOT restore inventory here.
+       *
+       * Inventory was already restored when the order
+       * was cancelled in cancelPaidOrder().
+       */
 
       const updatedOrder = await tx.orders.update({
         where: {
@@ -1489,15 +2343,39 @@ const retryPaidOrderRefund = async (userId, orderId) => {
 
           refund_status: REFUND_STATUS.PROCESSED,
 
+          razorpay_refund_id:
+            payment.refunds?.items?.[0]?.id ?? lockedOrder.razorpay_refund_id,
+
           refunded_at: lockedOrder.refunded_at || new Date(),
 
           updated_at: new Date(),
         },
       });
 
+      await createOrderStatusHistory(
+        tx,
+        orderId,
+        ORDER_STATUS.CANCELLED,
+        userId,
+        "Refund was already processed by Razorpay and the local order state was reconciled",
+      );
+
       return updatedOrder;
     });
+
+    return {
+      success: true,
+      message:
+        "Payment was already refunded by Razorpay. Local order state has been reconciled.",
+      order: result,
+    };
   }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Payment must be captured before requesting refund
+   * --------------------------------------------------------------------------
+   */
 
   if (payment.status !== "captured") {
     throw new AppError(
@@ -1505,6 +2383,12 @@ const retryPaidOrderRefund = async (userId, orderId) => {
       400,
     );
   }
+
+  /*
+   * --------------------------------------------------------------------------
+   * Request Razorpay refund
+   * --------------------------------------------------------------------------
+   */
 
   const refund = await requestRazorpayRefund(
     order.razorpay_payment_id,
@@ -1515,18 +2399,32 @@ const retryPaidOrderRefund = async (userId, orderId) => {
 
   const immediateRefundProcessed = refund.status === "processed";
 
-  return prisma.$transaction(async (tx) => {
+  /*
+   * --------------------------------------------------------------------------
+   * Update local database
+   * --------------------------------------------------------------------------
+   */
+
+  const result = await prisma.$transaction(async (tx) => {
     const lockedRows = await tx.$queryRaw`
-                    SELECT *
-                    FROM orders
-                    WHERE id = ${orderId}::uuid
-                    FOR UPDATE
-                `;
+                SELECT *
+                FROM orders
+                WHERE id = ${orderId}::uuid
+                FOR UPDATE
+            `;
 
     const lockedOrder = lockedRows[0];
 
     if (!lockedOrder) {
       throw new AppError("Order not found", 404);
+    }
+
+    if (lockedOrder.user_id !== userId) {
+      throw new AppError("You are not authorized to retry this refund.", 403);
+    }
+
+    if (lockedOrder.status !== ORDER_STATUS.CANCELLED) {
+      throw new AppError("Only cancelled orders can retry a refund.", 409);
     }
 
     const updatedOrder = await tx.orders.update({
@@ -1552,6 +2450,14 @@ const retryPaidOrderRefund = async (userId, orderId) => {
 
     return updatedOrder;
   });
+
+  return {
+    success: true,
+    message: immediateRefundProcessed
+      ? "Refund was successfully processed."
+      : "Refund was successfully initiated and is pending.",
+    order: result,
+  };
 };
 
 /*
@@ -1573,10 +2479,12 @@ export const cancelUnpaidOrderPaymentState = async (
   reason = "Unpaid order cancelled",
 ) => {
   const orderRows = await tx.$queryRaw`
+
                 SELECT *
                 FROM orders
                 WHERE id = ${orderId}::uuid
                 FOR UPDATE
+
             `;
 
   const order = orderRows[0];
@@ -1597,12 +2505,19 @@ export const cancelUnpaidOrderPaymentState = async (
     return order;
   }
 
+  /*
+        |--------------------------------------------------------------------------
+        | Release normal or variant reserved inventory
+        |--------------------------------------------------------------------------
+        */
+
   await releaseReservedInventory(tx, orderId);
 
   const updatedOrder = await tx.orders.update({
     where: {
       id: orderId,
     },
+
     data: {
       status: ORDER_STATUS.CANCELLED,
 
@@ -1612,9 +2527,13 @@ export const cancelUnpaidOrderPaymentState = async (
 
   await createOrderStatusHistory(
     tx,
+
     orderId,
+
     ORDER_STATUS.CANCELLED,
+
     changedBy,
+
     reason,
   );
 

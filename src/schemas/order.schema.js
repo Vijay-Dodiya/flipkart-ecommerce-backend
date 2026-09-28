@@ -1,15 +1,5 @@
 import { z } from "zod";
 
-// Admin can manually move an already-paid order
-// through these fulfillment statuses.
-//
-// "confirmed" is NOT included here because
-// successful payment already changes:
-//
-// pending → confirmed
-//
-// inside the payment service.
-
 export const updateOrderStatusSchema = z.object({
     status: z.enum([
         "processing",
@@ -22,4 +12,15 @@ export const createOrderSchema = z.object({
     addressId: z
         .string()
         .uuid("addressId must be a valid UUID"),
+
+    couponCode: z
+        .string()
+        .trim()
+        .min(3, "Coupon code must be at least 3 characters")
+        .max(50, "Coupon code cannot exceed 50 characters")
+        .transform((value) =>
+            value.toUpperCase()
+        )
+        .optional()
+        .nullable(),
 });

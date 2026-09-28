@@ -21,6 +21,7 @@ model users {
   reviews        reviews[]
   wishlist_items wishlist_items[]
   coupon_usages  coupon_usages[]
+  returns        returns[]
 }
 
 model categories {
@@ -40,24 +41,75 @@ model products {
   id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   category_id String    @db.Uuid
   name        String    @db.VarChar(255)
-  description String?
   price       Decimal   @db.Decimal(12, 2)
+  description String?
   brand       String?   @db.VarChar(100)
   sku         String    @unique @db.VarChar(100)
-  created_at  DateTime? @default(now()) @db.Timestamp(6)
-  updated_at  DateTime? @default(now()) @db.Timestamp(6)
   slug        String    @unique @db.VarChar(255)
 
-  inventory      inventory?
+  created_at  DateTime? @default(now()) @db.Timestamp(6)
+  updated_at  DateTime? @default(now()) @db.Timestamp(6)
+
   categories     categories       @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_category")
+  inventory      inventory?
   order_items    order_items[]
   reviews        reviews[]
   wishlist_items wishlist_items[]
+  variants product_variants[]
+  images ProductImage[]
 
   @@index([category_id])
   @@index([price])
   @@index([created_at])
   @@index([brand])
+}
+
+model product_variants {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  product_id  String   @db.Uuid
+
+  name        String   @db.VarChar(255)
+
+  sku         String   @unique @db.VarChar(100)
+
+  price       Decimal? @db.Decimal(12, 2)
+
+  attributes  Json
+
+  is_active   Boolean  @default(true)
+
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+  updated_at  DateTime @default(now()) @db.Timestamp(6)
+
+  products products    @relation(fields: [product_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_product_variant_product")
+
+  variant_inventory variant_inventory?
+
+  order_items order_items[]
+
+  @@index([product_id])
+  @@index([is_active])
+}
+
+model ProductImage {
+    id        String   @id @default(uuid()) @db.Uuid
+
+    productId String   @map("product_id") @db.Uuid
+    product   products @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+    imageUrl  String   @map("image_url")
+    altText   String?  @map("alt_text")
+
+    isPrimary Boolean  @default(false) @map("is_primary")
+    sortOrder Int      @default(0) @map("sort_order")
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([productId])
+    @@index([productId, sortOrder])
+    @@map("product_images")
 }
 
 model inventory {
@@ -70,6 +122,25 @@ model inventory {
   updated_at          DateTime? @default(now()) @db.Timestamp(6)
 
   products products @relation(fields: [product_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_inventory_product")
+}
+
+model variant_inventory {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  variant_id            String   @unique @db.Uuid
+
+  quantity              Int      @default(0)
+
+  reserved_quantity     Int      @default(0)
+
+  low_stock_threshold   Int      @default(5)
+
+  created_at            DateTime @default(now()) @db.Timestamp(6)
+  updated_at            DateTime @default(now()) @db.Timestamp(6)
+
+  product_variants product_variants @relation(fields: [variant_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_variant_inventory_variant")
+
+  @@index([quantity])
 }
 
 model orders {
@@ -103,13 +174,16 @@ model orders {
   status_history order_status_history[]
   order_address  order_addresses?
   coupon_usages  coupon_usages[]
+  returns        returns[]
 }
 
 model order_items {
   id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   order_id     String    @db.Uuid
   product_id   String    @db.Uuid
+  variant_id   String?   @db.Uuid
   product_name String    @db.VarChar(255)
+  variant_name String?   @db.VarChar(255)
   sku          String    @db.VarChar(100)
   quantity     Int
   unit_price   Decimal   @db.Decimal(12, 2)
@@ -118,6 +192,9 @@ model order_items {
 
   orders   orders   @relation(fields: [order_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_item_order")
   products products @relation(fields: [product_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_item_product")
+  product_variants product_variants? @relation(fields: [variant_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_item_variant" )
+  
+  return_items return_items[]
 }
 
 model payment_webhook_events {
@@ -295,4 +372,68 @@ model coupon_usages {
   @@index([coupon_id])
   @@index([user_id])
   @@index([order_id])
+}
+
+
+model returns {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  order_id String @db.Uuid
+  user_id  String @db.Uuid
+
+  status String @default("requested") @db.VarChar(30)
+
+  reason        String  @db.VarChar(50)
+  customer_note String? @db.Text
+  admin_note    String? @db.Text
+  
+  approved_by String? @db.Uuid
+  rejected_by String? @db.Uuid
+  received_by String? @db.Uuid
+
+  refund_amount Decimal @default(0) @db.Decimal(12, 2)
+  razorpay_refund_id String? @unique @db.VarChar(100)
+
+  requested_at DateTime  @default(now()) @db.Timestamp(6)
+  approved_at  DateTime? @db.Timestamp(6)
+  rejected_at  DateTime? @db.Timestamp(6)
+  received_at  DateTime? @db.Timestamp(6)
+  refunded_at  DateTime? @db.Timestamp(6)
+  cancelled_at DateTime? @db.Timestamp(6)
+
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  updated_at DateTime @default(now()) @db.Timestamp(6)
+
+  orders orders @relation(fields: [order_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_return_order")
+
+  users users @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_return_user")
+
+  return_items return_items[]
+
+  @@index([order_id])
+  @@index([user_id])
+  @@index([status])
+  @@index([requested_at])
+}
+
+
+model return_items {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  return_id    String @db.Uuid
+  order_item_id String @db.Uuid
+
+  quantity Int
+
+  unit_price   Decimal @db.Decimal(12, 2)
+  refund_amount Decimal @db.Decimal(12, 2)
+
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  returns returns @relation(fields: [return_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_return_item_return")
+
+  order_items order_items @relation(fields: [order_item_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_return_item_order_item")
+
+  @@index([return_id])
+  @@index([order_item_id])
 }

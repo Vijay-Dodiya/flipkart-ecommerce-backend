@@ -56,6 +56,22 @@ const PRODUCT_CACHE_TTL = 60;
 
 const PRODUCT_LIST_CACHE_TTL = 60;
 
+const PRODUCT_IMAGES_INCLUDE = {
+    images: {
+        orderBy: [
+            {
+                isPrimary: "desc",
+            },
+            {
+                sortOrder: "asc",
+            },
+            {
+                createdAt: "asc",
+            },
+        ],
+    },
+};
+
 /*
 |--------------------------------------------------------------------------
 | CREATE PRODUCT LIST CACHE KEY
@@ -603,6 +619,7 @@ export const getAllProducts = async (queryParams = {}) => {
       include: {
         categories: true,
         inventory: true,
+        ...PRODUCT_IMAGES_INCLUDE,
       },
 
       orderBy,
@@ -717,6 +734,7 @@ export const getProductById = async (productId) => {
     include: {
       categories: true,
       inventory: true,
+      ...PRODUCT_IMAGES_INCLUDE,
     },
   });
 

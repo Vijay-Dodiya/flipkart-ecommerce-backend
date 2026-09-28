@@ -3,11 +3,17 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import {
     createCoupon,
     getCoupons,
+    getCouponById,
     updateCoupon,
     deleteCoupon,
     validateCoupon,
 } from "../services/coupon.service.js";
 
+/**
+ * ============================================================
+ * Admin - Create Coupon
+ * ============================================================
+ */
 export const createCouponController =
     asyncHandler(async (req, res) => {
         const coupon =
@@ -21,6 +27,11 @@ export const createCouponController =
         });
     });
 
+/**
+ * ============================================================
+ * Admin - Get All Coupons
+ * ============================================================
+ */
 export const getCouponsController =
     asyncHandler(async (req, res) => {
         const coupons =
@@ -34,6 +45,31 @@ export const getCouponsController =
         });
     });
 
+/**
+ * ============================================================
+ * Admin - Get Coupon By ID
+ * ============================================================
+ */
+export const getCouponByIdController =
+    asyncHandler(async (req, res) => {
+        const { id } = req.params;
+
+        const coupon =
+            await getCouponById(id);
+
+        res.status(200).json({
+            success: true,
+            message:
+                "Coupon fetched successfully",
+            data: coupon,
+        });
+    });
+
+/**
+ * ============================================================
+ * Admin - Update Coupon
+ * ============================================================
+ */
 export const updateCouponController =
     asyncHandler(async (req, res) => {
         const { id } = req.params;
@@ -52,6 +88,11 @@ export const updateCouponController =
         });
     });
 
+/**
+ * ============================================================
+ * Admin - Delete Coupon
+ * ============================================================
+ */
 export const deleteCouponController =
     asyncHandler(async (req, res) => {
         const { id } = req.params;
@@ -67,6 +108,11 @@ export const deleteCouponController =
         });
     });
 
+/**
+ * ============================================================
+ * Customer - Validate Coupon
+ * ============================================================
+ */
 export const validateCouponController =
     asyncHandler(async (req, res) => {
         const { id: userId } = req.user;
@@ -83,6 +129,14 @@ export const validateCouponController =
                 orderAmount
             );
 
+        const finalAmount =
+            Number(
+                (
+                    orderAmount -
+                    result.discountAmount
+                ).toFixed(2)
+            );
+
         res.status(200).json({
             success: true,
             message:
@@ -92,15 +146,12 @@ export const validateCouponController =
                     result.coupon.id,
                 code:
                     result.coupon.code,
+                discountType:
+                    result.coupon.discount_type,
                 discountAmount:
                     result.discountAmount,
-                finalAmount:
-                    Number(
-                        (
-                            orderAmount -
-                            result.discountAmount
-                        ).toFixed(2)
-                    ),
+                orderAmount,
+                finalAmount,
             },
         });
     });

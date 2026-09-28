@@ -9,12 +9,13 @@ import {
 
 export const addToCartController = async (req, res) => {
 
-    const { productId, quantity } = req.body;
+    const { productId, quantity, variantId, } = req.body;
 
     const cart = await addToCart(
         req.user.id,
         productId,
-        quantity
+        quantity,
+        variantId,
     );
 
     res.status(200).json({
@@ -42,12 +43,13 @@ export const getMyCartController = async (req, res) => {
 export const updateCartItemController = async (req, res) => {
 
     const { productId } = req.params;
-    const { quantity } = req.body;
+    const { quantity,variantId } = req.body;
 
     const cart = await updateCartItem(
         req.user.id,
         productId,
-        quantity
+        quantity,
+        variantId
     );
 
     res.status(200).json({
@@ -61,11 +63,14 @@ export const updateCartItemController = async (req, res) => {
 export const removeCartItemController = async (req, res) => {
 
     const { productId } = req.params;
+    const { variantId } = req.body;
 
     const cart = await removeCartItem(
         req.user.id,
-        productId
+        productId,
+        variantId
     );
+
 
     res.status(200).json({
         success: true,

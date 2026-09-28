@@ -21,17 +21,21 @@ export const createOrderController = async (
     req,
     res
 ) => {
-    const { addressId } = req.body;
+    const {
+        addressId,
+        couponCode,
+    } = req.body;
 
     const order = await createOrder(
         req.user.id,
-        addressId
+        addressId,
+        couponCode
     );
 
-    res.status(201).json({
+    return res.status(201).json({
         success: true,
         message: "Order created successfully",
-        order,
+        data: order,
     });
 };
 

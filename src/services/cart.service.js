@@ -4,43 +4,50 @@ import prisma from "../config/prisma.js";
 
 import AppError from "../utils/AppError.js";
 
-
-/*
-|--------------------------------------------------------------------------
-| ADD PRODUCT TO CART
-|--------------------------------------------------------------------------
-*/
-
+/**
+ * ============================================================
+ * ADD PRODUCT / VARIANT TO CART
+ * ============================================================
+ *
+ * Product-only:
+ * productId + quantity
+ *
+ * Variant:
+ * productId + variantId + quantity
+ * ============================================================
+ */
 export const addToCart = async (
     userId,
     productId,
-    quantity
+    quantity,
+    variantId = null
 ) => {
-
+    // ---------------------------------------------------------
     // 1. Validate quantity
-    if (!Number.isInteger(quantity) || quantity < 1) {
+    // ---------------------------------------------------------
+    if (
+        !Number.isInteger(quantity) ||
+        quantity < 1
+    ) {
         throw new AppError(
             "Quantity must be at least 1",
             400
         );
     }
 
+    // ---------------------------------------------------------
+    // 2. Find product
+    // ---------------------------------------------------------
+    const product =
+        await prisma.products.findUnique({
+            where: {
+                id: productId,
+            },
+            include: {
+                inventory: true,
+            },
+        });
 
-    // 2. Find product + inventory
-    const product = await prisma.products.findUnique({
-
-        where: {
-            id: productId,
-        },
-
-        include: {
-            inventory: true,
-        },
-
-    });
-
-
-    // 3. Product must exist
     if (!product) {
         throw new AppError(
             "Product not found",
@@ -48,23 +55,92 @@ export const addToCart = async (
         );
     }
 
+    let availableStock;
 
-    // 4. Inventory must exist
-    if (!product.inventory) {
-        throw new AppError(
-            "Product inventory not found",
-            404
-        );
+    // ---------------------------------------------------------
+    // 3. Variant flow
+    // ---------------------------------------------------------
+    if (variantId) {
+        const variant =
+            await prisma.product_variants.findUnique(
+                {
+                    where: {
+                        id: variantId,
+                    },
+                    include: {
+                        variant_inventory: true,
+                    },
+                }
+            );
+
+        if (!variant) {
+            throw new AppError(
+                "Product variant not found",
+                404
+            );
+        }
+
+        // Variant must belong to this product
+        if (
+            variant.product_id !==
+            productId
+        ) {
+            throw new AppError(
+                "Product variant does not belong to this product",
+                400
+            );
+        }
+
+        // Variant must be active
+        if (!variant.is_active) {
+            throw new AppError(
+                "Product variant is not available",
+                400
+            );
+        }
+
+        if (!variant.variant_inventory) {
+            throw new AppError(
+                "Variant inventory not found",
+                404
+            );
+        }
+
+        availableStock =
+            Number(
+                variant.variant_inventory
+                    .quantity
+            ) -
+            Number(
+                variant.variant_inventory
+                    .reserved_quantity
+            );
     }
 
+    // ---------------------------------------------------------
+    // 4. Normal product flow
+    // ---------------------------------------------------------
+    else {
+        if (!product.inventory) {
+            throw new AppError(
+                "Product inventory not found",
+                404
+            );
+        }
 
-    // 5. Calculate available stock
-    const availableStock =
-        product.inventory.quantity -
-        product.inventory.reserved_quantity;
+        availableStock =
+            Number(
+                product.inventory.quantity
+            ) -
+            Number(
+                product.inventory
+                    .reserved_quantity
+            );
+    }
 
-
-    // 6. Available stock must be positive
+    // ---------------------------------------------------------
+    // 5. Stock validation
+    // ---------------------------------------------------------
     if (availableStock <= 0) {
         throw new AppError(
             "Product is out of stock",
@@ -72,352 +148,382 @@ export const addToCart = async (
         );
     }
 
-
-    // 7. Requested quantity cannot exceed available stock
     if (quantity > availableStock) {
         throw new AppError(
-            "Insufficient stock",
+            `Insufficient stock. Only ${availableStock} units are available.`,
             400
         );
     }
 
-
-    // 8. Find user's cart
+    // ---------------------------------------------------------
+    // 6. Find user's cart
+    // ---------------------------------------------------------
     let cart = await Cart.findOne({
         userId,
     });
 
-
-    // 9. Create cart if it doesn't exist
+    // ---------------------------------------------------------
+    // 7. Create cart
+    // ---------------------------------------------------------
     if (!cart) {
-
         cart = await Cart.create({
-
             userId,
-
             items: [
                 {
                     productId,
+                    variantId,
                     quantity,
                 },
             ],
-
         });
 
         return cart;
     }
 
+    // ---------------------------------------------------------
+    // 8. Find same product + same variant
+    //
+    // Product-only:
+    // productId + null
+    //
+    // Variant:
+    // productId + variantId
+    // ---------------------------------------------------------
+    const existingItem =
+        cart.items.find(
+            (item) =>
+                item.productId ===
+                    productId &&
+                (item.variantId ?? null) ===
+                    (variantId ?? null)
+        );
 
-    // 10. Check whether product already exists
-    // inside the cart
-    const existingItem = cart.items.find(
-        (item) =>
-            item.productId === productId
-    );
-
-
-    // 11. Product already exists
+    // ---------------------------------------------------------
+    // 9. Existing cart item
+    // ---------------------------------------------------------
     if (existingItem) {
-
         const newQuantity =
             existingItem.quantity +
             quantity;
 
-
-        // IMPORTANT:
-        // Validate TOTAL cart quantity,
-        // not only the newly added quantity.
-        if (newQuantity > availableStock) {
-
+        if (
+            newQuantity >
+            availableStock
+        ) {
             throw new AppError(
                 `Insufficient stock. Only ${availableStock} units are available.`,
                 400
             );
         }
 
-
         existingItem.quantity =
             newQuantity;
-
-    } else {
-
-        // 12. Product does not exist
-        // in cart yet
-        cart.items.push({
-
-            productId,
-
-            quantity,
-
-        });
-
     }
 
+    // ---------------------------------------------------------
+    // 10. New cart item
+    // ---------------------------------------------------------
+    else {
+        cart.items.push({
+            productId,
+            variantId,
+            quantity,
+        });
+    }
 
-    // 13. Save updated cart
+    // ---------------------------------------------------------
+    // 11. Save cart
+    // ---------------------------------------------------------
     await cart.save();
-
 
     return cart;
 };
 
-
-
-/*
-|--------------------------------------------------------------------------
-| GET MY CART
-|--------------------------------------------------------------------------
-*/
-
+/**
+ * ============================================================
+ * GET MY CART
+ * ============================================================
+ */
 export const getMyCart = async (
     userId
 ) => {
-
     const cart = await Cart.findOne({
         userId,
     });
 
-
     if (!cart) {
-
         throw new AppError(
             "Cart not found",
             404
         );
-
     }
-
 
     return cart;
 };
 
-
-
-/*
-|--------------------------------------------------------------------------
-| UPDATE CART ITEM
-|--------------------------------------------------------------------------
-*/
-
+/**
+ * ============================================================
+ * UPDATE CART ITEM
+ * ============================================================
+ */
 export const updateCartItem = async (
     userId,
     productId,
-    quantity
+    quantity,
+    variantId = null
 ) => {
-
+    // ---------------------------------------------------------
     // 1. Validate quantity
-    if (!Number.isInteger(quantity) || quantity < 1) {
-
+    // ---------------------------------------------------------
+    if (
+        !Number.isInteger(quantity) ||
+        quantity < 1
+    ) {
         throw new AppError(
             "Quantity must be at least 1",
             400
         );
-
     }
 
-
-    // 2. Find product + inventory
+    // ---------------------------------------------------------
+    // 2. Find product
+    // ---------------------------------------------------------
     const product =
         await prisma.products.findUnique({
-
             where: {
                 id: productId,
             },
-
             include: {
                 inventory: true,
             },
-
         });
 
-
     if (!product) {
-
         throw new AppError(
             "Product not found",
             404
         );
-
     }
 
+    let availableStock;
 
-    if (!product.inventory) {
+    // ---------------------------------------------------------
+    // 3. Variant inventory
+    // ---------------------------------------------------------
+    if (variantId) {
+        const variant =
+            await prisma.product_variants.findUnique(
+                {
+                    where: {
+                        id: variantId,
+                    },
+                    include: {
+                        variant_inventory: true,
+                    },
+                }
+            );
 
-        throw new AppError(
-            "Product inventory not found",
-            404
-        );
+        if (!variant) {
+            throw new AppError(
+                "Product variant not found",
+                404
+            );
+        }
 
+        if (
+            variant.product_id !==
+            productId
+        ) {
+            throw new AppError(
+                "Product variant does not belong to this product",
+                400
+            );
+        }
+
+        if (!variant.is_active) {
+            throw new AppError(
+                "Product variant is not available",
+                400
+            );
+        }
+
+        if (!variant.variant_inventory) {
+            throw new AppError(
+                "Variant inventory not found",
+                404
+            );
+        }
+
+        availableStock =
+            Number(
+                variant.variant_inventory
+                    .quantity
+            ) -
+            Number(
+                variant.variant_inventory
+                    .reserved_quantity
+            );
     }
 
+    // ---------------------------------------------------------
+    // 4. Normal product inventory
+    // ---------------------------------------------------------
+    else {
+        if (!product.inventory) {
+            throw new AppError(
+                "Product inventory not found",
+                404
+            );
+        }
 
-    // 3. Calculate available stock
-    const availableStock =
-        product.inventory.quantity -
-        product.inventory.reserved_quantity;
+        availableStock =
+            Number(
+                product.inventory.quantity
+            ) -
+            Number(
+                product.inventory
+                    .reserved_quantity
+            );
+    }
 
-
-    // 4. Check stock
+    // ---------------------------------------------------------
+    // 5. Stock validation
+    // ---------------------------------------------------------
     if (availableStock <= 0) {
-
         throw new AppError(
             "Product is out of stock",
             400
         );
-
     }
 
-
     if (quantity > availableStock) {
-
         throw new AppError(
             `Insufficient stock. Only ${availableStock} units are available.`,
             400
         );
-
     }
 
-
-    // 5. Find user's cart
+    // ---------------------------------------------------------
+    // 6. Find cart
+    // ---------------------------------------------------------
     const cart = await Cart.findOne({
         userId,
     });
 
-
     if (!cart) {
-
         throw new AppError(
             "Cart not found",
             404
         );
-
     }
 
-
-    // 6. Find product in cart
-    const existingItem = cart.items.find(
-        (item) =>
-            item.productId === productId
-    );
-
-
-    if (!existingItem) {
-
-        throw new AppError(
-            "Product not found in cart",
-            404
+    // ---------------------------------------------------------
+    // 7. Find exact product + variant
+    // ---------------------------------------------------------
+    const existingItem =
+        cart.items.find(
+            (item) =>
+                item.productId ===
+                    productId &&
+                (item.variantId ?? null) ===
+                    (variantId ?? null)
         );
 
+    if (!existingItem) {
+        throw new AppError(
+            "Product variant not found in cart",
+            404
+        );
     }
 
-
-    // 7. Update quantity
+    // ---------------------------------------------------------
+    // 8. Update quantity
+    // ---------------------------------------------------------
     existingItem.quantity =
         quantity;
 
-
-    // 8. Save cart
     await cart.save();
-
 
     return cart;
 };
 
-
-
-/*
-|--------------------------------------------------------------------------
-| REMOVE CART ITEM
-|--------------------------------------------------------------------------
-*/
-
+/**
+ * ============================================================
+ * REMOVE CART ITEM
+ * ============================================================
+ */
 export const removeCartItem = async (
     userId,
-    productId
+    productId,
+    variantId = null
 ) => {
-
-    // Find user's cart
     const cart = await Cart.findOne({
         userId,
     });
 
-
     if (!cart) {
-
         throw new AppError(
             "Cart not found",
             404
         );
-
     }
 
-
-    // Find product inside cart
-    const existingItem = cart.items.find(
-        (item) =>
-            item.productId === productId
-    );
-
-
-    if (!existingItem) {
-
-        throw new AppError(
-            "Product not found in cart",
-            404
+    const existingItem =
+        cart.items.find(
+            (item) =>
+                item.productId ===
+                    productId &&
+                (item.variantId ?? null) ===
+                    (variantId ?? null)
         );
 
+    if (!existingItem) {
+        throw new AppError(
+            "Product variant not found in cart",
+            404
+        );
     }
 
+    cart.items =
+        cart.items.filter(
+            (item) =>
+                !(
+                    item.productId ===
+                        productId &&
+                    (item.variantId ??
+                        null) ===
+                        (variantId ??
+                            null)
+                )
+        );
 
-    // Remove item
-    cart.items = cart.items.filter(
-        (item) =>
-            item.productId !== productId
-    );
-
-
-    // Save cart
     await cart.save();
-
 
     return cart;
 };
 
-
-
-/*
-|--------------------------------------------------------------------------
-| CLEAR CART
-|--------------------------------------------------------------------------
-*/
-
+/**
+ * ============================================================
+ * CLEAR CART
+ * ============================================================
+ */
 export const clearCart = async (
     userId
 ) => {
-
-    // Find user's cart
     const cart = await Cart.findOne({
         userId,
     });
 
-
     if (!cart) {
-
         throw new AppError(
             "Cart not found",
             404
         );
-
     }
 
-
-    // Remove all items
     cart.items = [];
 
-
-    // Save cart
     await cart.save();
-
 
     return cart;
 };
