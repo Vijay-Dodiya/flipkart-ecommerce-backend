@@ -53,9 +53,47 @@ export const getInventoryByProductId = async (productId) => {
 };
 
 
-export const updateInventory = async (productId, inventoryData) => {
+// export const updateInventory = async (productId, inventoryData) => {
 
-    // 1. Check if inventory exists
+//     // 1. Check if inventory exists
+//     const existingInventory = await prisma.inventory.findUnique({
+//         where: {
+//             product_id: productId,
+//         },
+//     });
+
+//     if (!existingInventory) {
+//         throw new AppError("Inventory not found", 404);
+//     }
+
+//     // 2. Get final values
+//     const quantity =
+//         inventoryData.quantity ?? existingInventory.quantity;
+
+//     const reservedQuantity =
+//         inventoryData.reserved_quantity ??
+//         existingInventory.reserved_quantity;
+
+//     // 3. Validate reserved quantity
+//     if (reservedQuantity > quantity) {
+//         throw new AppError(
+//             "Reserved quantity cannot be greater than quantity",
+//             400
+//         );
+//     }
+
+//     // 4. Update inventory
+//     const inventory = await prisma.inventory.update({
+//         where: {
+//             product_id: productId,
+//         },
+//         data: inventoryData,
+//     });
+
+//     return inventory;
+// };
+export const updateInventory = async (productId, inventoryData) => {
+    // 1. Check whether inventory exists
     const existingInventory = await prisma.inventory.findUnique({
         where: {
             product_id: productId,
@@ -66,7 +104,7 @@ export const updateInventory = async (productId, inventoryData) => {
         throw new AppError("Inventory not found", 404);
     }
 
-    // 2. Get final values
+    // 2. Calculate the final values
     const quantity =
         inventoryData.quantity ?? existingInventory.quantity;
 
@@ -74,7 +112,28 @@ export const updateInventory = async (productId, inventoryData) => {
         inventoryData.reserved_quantity ??
         existingInventory.reserved_quantity;
 
-    // 3. Validate reserved quantity
+    // 3. Validate inventory values
+    if (quantity < 0) {
+        throw new AppError("Quantity cannot be negative", 400);
+    }
+
+    if (reservedQuantity < 0) {
+        throw new AppError(
+            "Reserved quantity cannot be negative",
+            400
+        );
+    }
+
+    if (
+        inventoryData.low_stock_threshold !== undefined &&
+        inventoryData.low_stock_threshold < 0
+    ) {
+        throw new AppError(
+            "Low stock threshold cannot be negative",
+            400
+        );
+    }
+
     if (reservedQuantity > quantity) {
         throw new AppError(
             "Reserved quantity cannot be greater than quantity",
@@ -92,7 +151,6 @@ export const updateInventory = async (productId, inventoryData) => {
 
     return inventory;
 };
-
 
 export const deleteInventory = async (productId) => {
 

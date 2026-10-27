@@ -12,6 +12,7 @@ import { authorize } from "../middleware/role.middleware.js";
 import { validate } from "../middleware/validate.middleware.js";
 
 import { inventorySchema } from "../schemas/inventory.schema.js";
+import { updateInventorySchema } from "../schemas/update-inventory.schema.js";
 
 const router = express.Router();
 
@@ -162,6 +163,7 @@ router.put(
     "/:productId",
     authenticate,
     authorize("admin"),
+    validate(updateInventorySchema),
     updateInventoryController
 );
 

@@ -5,11 +5,13 @@ const cartItemSchema = new mongoose.Schema(
         productId: {
             type: String,
             required: true,
+            trim: true,
         },
 
         variantId: {
             type: String,
             default: null,
+            trim: true,
         },
 
         quantity: {
@@ -29,6 +31,7 @@ const cartSchema = new mongoose.Schema(
             type: String,
             required: true,
             unique: true,
+            trim: true,
         },
 
         items: {

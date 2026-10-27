@@ -16,6 +16,8 @@ import { addToCartSchema } from "../schemas/cart.schema.js";
 
 import { updateCartSchema } from "../schemas/update-cart.schema.js";
 
+import { removeCartItemSchema } from "../schemas/remove-cart.schema.js";
+
 const router = express.Router();
 
 /**
@@ -203,7 +205,12 @@ router.put(
  *       404:
  *         description: Cart item not found
  */
-router.delete("/:productId", authenticate, removeCartItemController);
+router.delete(
+    "/:productId",
+    authenticate,
+    validate(removeCartItemSchema),
+    removeCartItemController
+);
 
 /**
  * @swagger

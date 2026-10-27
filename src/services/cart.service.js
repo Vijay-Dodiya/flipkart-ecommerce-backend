@@ -4,40 +4,50 @@ import prisma from "../config/prisma.js";
 
 import AppError from "../utils/AppError.js";
 
+
+/**
+ * Normalize variant ID.
+ *
+ * undefined and null both represent
+ * a product without a variant.
+ */
+const normalizeVariantId = (variantId) => {
+    return variantId ?? null;
+};
+
+
 /**
  * ============================================================
- * ADD PRODUCT / VARIANT TO CART
+ * GET PURCHASE TARGET
  * ============================================================
  *
- * Product-only:
- * productId + quantity
+ * Determines whether the cart item should use:
  *
- * Variant:
- * productId + variantId + quantity
- * ============================================================
+ * Product inventory
+ * OR
+ * Variant inventory
+ *
+ * Rules:
+ *
+ * 1. Product must exist.
+ * 2. If product has variants, variantId is required.
+ * 3. Variant must belong to the product.
+ * 4. Variant must be active.
+ * 5. Variant inventory must exist.
+ * 6. Product without variants must have normal inventory.
  */
-export const addToCart = async (
-    userId,
+const getPurchaseTarget = async (
     productId,
-    quantity,
     variantId = null
 ) => {
-    // ---------------------------------------------------------
-    // 1. Validate quantity
-    // ---------------------------------------------------------
-    if (
-        !Number.isInteger(quantity) ||
-        quantity < 1
-    ) {
-        throw new AppError(
-            "Quantity must be at least 1",
-            400
-        );
-    }
+    const normalizedVariantId =
+        normalizeVariantId(variantId);
+
 
     // ---------------------------------------------------------
-    // 2. Find product
+    // Find product
     // ---------------------------------------------------------
+
     const product =
         await prisma.products.findUnique({
             where: {
@@ -48,6 +58,7 @@ export const addToCart = async (
             },
         });
 
+
     if (!product) {
         throw new AppError(
             "Product not found",
@@ -55,23 +66,47 @@ export const addToCart = async (
         );
     }
 
-    let availableStock;
 
     // ---------------------------------------------------------
-    // 3. Variant flow
+    // Find whether this product has variants
     // ---------------------------------------------------------
-    if (variantId) {
-        const variant =
-            await prisma.product_variants.findUnique(
-                {
-                    where: {
-                        id: variantId,
-                    },
-                    include: {
-                        variant_inventory: true,
-                    },
-                }
+
+    const variantCount =
+        await prisma.product_variants.count({
+            where: {
+                product_id: productId,
+            },
+        });
+
+
+    const productHasVariants =
+        variantCount > 0;
+
+
+    // ---------------------------------------------------------
+    // Product has variants
+    // ---------------------------------------------------------
+
+    if (productHasVariants) {
+
+        if (!normalizedVariantId) {
+            throw new AppError(
+                "Variant selection is required for this product",
+                400
             );
+        }
+
+
+        const variant =
+            await prisma.product_variants.findUnique({
+                where: {
+                    id: normalizedVariantId,
+                },
+                include: {
+                    variant_inventory: true,
+                },
+            });
+
 
         if (!variant) {
             throw new AppError(
@@ -80,7 +115,11 @@ export const addToCart = async (
             );
         }
 
-        // Variant must belong to this product
+
+        // -----------------------------------------------------
+        // Make sure variant belongs to product
+        // -----------------------------------------------------
+
         if (
             variant.product_id !==
             productId
@@ -91,13 +130,22 @@ export const addToCart = async (
             );
         }
 
+
+        // -----------------------------------------------------
         // Variant must be active
+        // -----------------------------------------------------
+
         if (!variant.is_active) {
             throw new AppError(
                 "Product variant is not available",
                 400
             );
         }
+
+
+        // -----------------------------------------------------
+        // Variant inventory must exist
+        // -----------------------------------------------------
 
         if (!variant.variant_inventory) {
             throw new AppError(
@@ -106,41 +154,80 @@ export const addToCart = async (
             );
         }
 
-        availableStock =
+
+        const availableStock =
             Number(
-                variant.variant_inventory
-                    .quantity
+                variant.variant_inventory.quantity
             ) -
             Number(
-                variant.variant_inventory
-                    .reserved_quantity
+                variant.variant_inventory.reserved_quantity
             );
+
+
+        return {
+            type: "variant",
+            product,
+            variant,
+            inventory:
+                variant.variant_inventory,
+            availableStock,
+        };
     }
 
-    // ---------------------------------------------------------
-    // 4. Normal product flow
-    // ---------------------------------------------------------
-    else {
-        if (!product.inventory) {
-            throw new AppError(
-                "Product inventory not found",
-                404
-            );
-        }
 
-        availableStock =
-            Number(
-                product.inventory.quantity
-            ) -
-            Number(
-                product.inventory
-                    .reserved_quantity
-            );
+    // ---------------------------------------------------------
+    // Product does NOT have variants
+    // ---------------------------------------------------------
+
+    if (normalizedVariantId) {
+        throw new AppError(
+            "This product does not have variants",
+            400
+        );
     }
 
+
     // ---------------------------------------------------------
-    // 5. Stock validation
+    // Normal product inventory
     // ---------------------------------------------------------
+
+    if (!product.inventory) {
+        throw new AppError(
+            "Product inventory not found",
+            404
+        );
+    }
+
+
+    const availableStock =
+        Number(
+            product.inventory.quantity
+        ) -
+        Number(
+            product.inventory.reserved_quantity
+        );
+
+
+    return {
+        type: "product",
+        product,
+        variant: null,
+        inventory: product.inventory,
+        availableStock,
+    };
+};
+
+
+/**
+ * ============================================================
+ * VALIDATE STOCK
+ * ============================================================
+ */
+const validateStock = (
+    availableStock,
+    quantity
+) => {
+
     if (availableStock <= 0) {
         throw new AppError(
             "Product is out of stock",
@@ -148,96 +235,195 @@ export const addToCart = async (
         );
     }
 
+
     if (quantity > availableStock) {
         throw new AppError(
             `Insufficient stock. Only ${availableStock} units are available.`,
             400
         );
     }
+};
+
+
+/**
+ * ============================================================
+ * FIND CART ITEM
+ * ============================================================
+ */
+const findCartItem = (
+    cart,
+    productId,
+    variantId = null
+) => {
+
+    const normalizedVariantId =
+        normalizeVariantId(variantId);
+
+
+    return cart.items.find(
+        (item) =>
+            item.productId === productId &&
+            (item.variantId ?? null) ===
+                normalizedVariantId
+    );
+};
+
+
+/**
+ * ============================================================
+ * ADD PRODUCT / VARIANT TO CART
+ * ============================================================
+ *
+ * Product without variants:
+ *
+ * productId + quantity
+ *
+ * Product with variants:
+ *
+ * productId + variantId + quantity
+ */
+export const addToCart = async (
+    userId,
+    productId,
+    quantity,
+    variantId = null
+) => {
 
     // ---------------------------------------------------------
-    // 6. Find user's cart
+    // 1. Validate quantity
     // ---------------------------------------------------------
+
+    if (
+        !Number.isInteger(quantity) ||
+        quantity < 1
+    ) {
+        throw new AppError(
+            "Quantity must be at least 1",
+            400
+        );
+    }
+
+
+    // ---------------------------------------------------------
+    // 2. Determine product/variant inventory
+    // ---------------------------------------------------------
+
+    const purchaseTarget =
+        await getPurchaseTarget(
+            productId,
+            variantId
+        );
+
+
+    // ---------------------------------------------------------
+    // 3. Validate stock
+    // ---------------------------------------------------------
+
+    validateStock(
+        purchaseTarget.availableStock,
+        quantity
+    );
+
+
+    // ---------------------------------------------------------
+    // 4. Normalize variant
+    // ---------------------------------------------------------
+
+    const normalizedVariantId =
+        normalizeVariantId(variantId);
+
+
+    // ---------------------------------------------------------
+    // 5. Find user's cart
+    // ---------------------------------------------------------
+
     let cart = await Cart.findOne({
         userId,
     });
 
+
     // ---------------------------------------------------------
-    // 7. Create cart
+    // 6. Create cart
     // ---------------------------------------------------------
+
     if (!cart) {
+
         cart = await Cart.create({
             userId,
+
             items: [
                 {
                     productId,
-                    variantId,
+                    variantId:
+                        normalizedVariantId,
                     quantity,
                 },
             ],
         });
 
+
         return cart;
     }
 
-    // ---------------------------------------------------------
-    // 8. Find same product + same variant
-    //
-    // Product-only:
-    // productId + null
-    //
-    // Variant:
-    // productId + variantId
-    // ---------------------------------------------------------
-    const existingItem =
-        cart.items.find(
-            (item) =>
-                item.productId ===
-                    productId &&
-                (item.variantId ?? null) ===
-                    (variantId ?? null)
-        );
 
     // ---------------------------------------------------------
-    // 9. Existing cart item
+    // 7. Find exact product + variant
     // ---------------------------------------------------------
+
+    const existingItem =
+        findCartItem(
+            cart,
+            productId,
+            normalizedVariantId
+        );
+
+
+    // ---------------------------------------------------------
+    // 8. Existing cart item
+    // ---------------------------------------------------------
+
     if (existingItem) {
+
         const newQuantity =
             existingItem.quantity +
             quantity;
 
-        if (
-            newQuantity >
-            availableStock
-        ) {
-            throw new AppError(
-                `Insufficient stock. Only ${availableStock} units are available.`,
-                400
-            );
-        }
+
+        validateStock(
+            purchaseTarget.availableStock,
+            newQuantity
+        );
+
 
         existingItem.quantity =
             newQuantity;
     }
 
+
     // ---------------------------------------------------------
-    // 10. New cart item
+    // 9. New cart item
     // ---------------------------------------------------------
+
     else {
+
         cart.items.push({
             productId,
-            variantId,
+            variantId:
+                normalizedVariantId,
             quantity,
         });
     }
 
+
     // ---------------------------------------------------------
-    // 11. Save cart
+    // 10. Save cart
     // ---------------------------------------------------------
+
     await cart.save();
 
     return cart;
 };
+
 
 /**
  * ============================================================
@@ -247,9 +433,12 @@ export const addToCart = async (
 export const getMyCart = async (
     userId
 ) => {
-    const cart = await Cart.findOne({
-        userId,
-    });
+
+    const cart =
+        await Cart.findOne({
+            userId,
+        });
+
 
     if (!cart) {
         throw new AppError(
@@ -258,8 +447,10 @@ export const getMyCart = async (
         );
     }
 
+
     return cart;
 };
+
 
 /**
  * ============================================================
@@ -272,9 +463,11 @@ export const updateCartItem = async (
     quantity,
     variantId = null
 ) => {
+
     // ---------------------------------------------------------
     // 1. Validate quantity
     // ---------------------------------------------------------
+
     if (
         !Number.isInteger(quantity) ||
         quantity < 1
@@ -285,130 +478,24 @@ export const updateCartItem = async (
         );
     }
 
+
     // ---------------------------------------------------------
-    // 2. Find product
+    // 2. Normalize variant
     // ---------------------------------------------------------
-    const product =
-        await prisma.products.findUnique({
-            where: {
-                id: productId,
-            },
-            include: {
-                inventory: true,
-            },
+
+    const normalizedVariantId =
+        normalizeVariantId(variantId);
+
+
+    // ---------------------------------------------------------
+    // 3. Find cart
+    // ---------------------------------------------------------
+
+    const cart =
+        await Cart.findOne({
+            userId,
         });
 
-    if (!product) {
-        throw new AppError(
-            "Product not found",
-            404
-        );
-    }
-
-    let availableStock;
-
-    // ---------------------------------------------------------
-    // 3. Variant inventory
-    // ---------------------------------------------------------
-    if (variantId) {
-        const variant =
-            await prisma.product_variants.findUnique(
-                {
-                    where: {
-                        id: variantId,
-                    },
-                    include: {
-                        variant_inventory: true,
-                    },
-                }
-            );
-
-        if (!variant) {
-            throw new AppError(
-                "Product variant not found",
-                404
-            );
-        }
-
-        if (
-            variant.product_id !==
-            productId
-        ) {
-            throw new AppError(
-                "Product variant does not belong to this product",
-                400
-            );
-        }
-
-        if (!variant.is_active) {
-            throw new AppError(
-                "Product variant is not available",
-                400
-            );
-        }
-
-        if (!variant.variant_inventory) {
-            throw new AppError(
-                "Variant inventory not found",
-                404
-            );
-        }
-
-        availableStock =
-            Number(
-                variant.variant_inventory
-                    .quantity
-            ) -
-            Number(
-                variant.variant_inventory
-                    .reserved_quantity
-            );
-    }
-
-    // ---------------------------------------------------------
-    // 4. Normal product inventory
-    // ---------------------------------------------------------
-    else {
-        if (!product.inventory) {
-            throw new AppError(
-                "Product inventory not found",
-                404
-            );
-        }
-
-        availableStock =
-            Number(
-                product.inventory.quantity
-            ) -
-            Number(
-                product.inventory
-                    .reserved_quantity
-            );
-    }
-
-    // ---------------------------------------------------------
-    // 5. Stock validation
-    // ---------------------------------------------------------
-    if (availableStock <= 0) {
-        throw new AppError(
-            "Product is out of stock",
-            400
-        );
-    }
-
-    if (quantity > availableStock) {
-        throw new AppError(
-            `Insufficient stock. Only ${availableStock} units are available.`,
-            400
-        );
-    }
-
-    // ---------------------------------------------------------
-    // 6. Find cart
-    // ---------------------------------------------------------
-    const cart = await Cart.findOne({
-        userId,
-    });
 
     if (!cart) {
         throw new AppError(
@@ -417,35 +504,65 @@ export const updateCartItem = async (
         );
     }
 
+
     // ---------------------------------------------------------
-    // 7. Find exact product + variant
+    // 4. Find exact cart item
     // ---------------------------------------------------------
+
     const existingItem =
-        cart.items.find(
-            (item) =>
-                item.productId ===
-                    productId &&
-                (item.variantId ?? null) ===
-                    (variantId ?? null)
+        findCartItem(
+            cart,
+            productId,
+            normalizedVariantId
         );
+
 
     if (!existingItem) {
         throw new AppError(
-            "Product variant not found in cart",
+            "Cart item not found",
             404
         );
     }
 
+
     // ---------------------------------------------------------
-    // 8. Update quantity
+    // 5. Validate product / variant
     // ---------------------------------------------------------
+
+    const purchaseTarget =
+        await getPurchaseTarget(
+            productId,
+            normalizedVariantId
+        );
+
+
+    // ---------------------------------------------------------
+    // 6. Validate stock
+    // ---------------------------------------------------------
+
+    validateStock(
+        purchaseTarget.availableStock,
+        quantity
+    );
+
+
+    // ---------------------------------------------------------
+    // 7. Update quantity
+    // ---------------------------------------------------------
+
     existingItem.quantity =
         quantity;
+
+
+    // ---------------------------------------------------------
+    // 8. Save
+    // ---------------------------------------------------------
 
     await cart.save();
 
     return cart;
 };
+
 
 /**
  * ============================================================
@@ -457,9 +574,20 @@ export const removeCartItem = async (
     productId,
     variantId = null
 ) => {
-    const cart = await Cart.findOne({
-        userId,
-    });
+
+    const normalizedVariantId =
+        normalizeVariantId(variantId);
+
+
+    // ---------------------------------------------------------
+    // 1. Find cart
+    // ---------------------------------------------------------
+
+    const cart =
+        await Cart.findOne({
+            userId,
+        });
+
 
     if (!cart) {
         throw new AppError(
@@ -468,21 +596,30 @@ export const removeCartItem = async (
         );
     }
 
+
+    // ---------------------------------------------------------
+    // 2. Find exact item
+    // ---------------------------------------------------------
+
     const existingItem =
-        cart.items.find(
-            (item) =>
-                item.productId ===
-                    productId &&
-                (item.variantId ?? null) ===
-                    (variantId ?? null)
+        findCartItem(
+            cart,
+            productId,
+            normalizedVariantId
         );
+
 
     if (!existingItem) {
         throw new AppError(
-            "Product variant not found in cart",
+            "Cart item not found",
             404
         );
     }
+
+
+    // ---------------------------------------------------------
+    // 3. Remove exact product + variant
+    // ---------------------------------------------------------
 
     cart.items =
         cart.items.filter(
@@ -490,17 +627,21 @@ export const removeCartItem = async (
                 !(
                     item.productId ===
                         productId &&
-                    (item.variantId ??
-                        null) ===
-                        (variantId ??
-                            null)
+                    (item.variantId ?? null) ===
+                        normalizedVariantId
                 )
         );
+
+
+    // ---------------------------------------------------------
+    // 4. Save
+    // ---------------------------------------------------------
 
     await cart.save();
 
     return cart;
 };
+
 
 /**
  * ============================================================
@@ -510,9 +651,12 @@ export const removeCartItem = async (
 export const clearCart = async (
     userId
 ) => {
-    const cart = await Cart.findOne({
-        userId,
-    });
+
+    const cart =
+        await Cart.findOne({
+            userId,
+        });
+
 
     if (!cart) {
         throw new AppError(
@@ -521,7 +665,9 @@ export const clearCart = async (
         );
     }
 
+
     cart.items = [];
+
 
     await cart.save();
 

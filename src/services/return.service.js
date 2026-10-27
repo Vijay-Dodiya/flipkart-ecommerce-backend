@@ -154,23 +154,34 @@ export const createReturnRequest = async (userId, data) => {
           // 6. Find already returned quantities
           // ------------------------------------------------
 
-          const existingReturnItems = await tx.return_items.findMany({
+          const existingReturns = await tx.returns.findMany({
             where: {
-              order_items: {
-                order_id: order.id,
+              order_id: order.id,
+              status: {
+                in: [
+                  RETURN_STATUS.REQUESTED,
+                  RETURN_STATUS.APPROVED,
+                  RETURN_STATUS.RECEIVED,
+                  RETURN_STATUS.REFUNDED,
+                ],
               },
+            },
+            include: {
+              return_items: true,
             },
           });
 
           const returnedQuantityMap = new Map();
 
-          for (const item of existingReturnItems) {
-            const current = returnedQuantityMap.get(item.order_item_id) || 0;
+          for (const existingReturn of existingReturns) {
+            for (const item of existingReturn.return_items) {
+              const current = returnedQuantityMap.get(item.order_item_id) || 0;
 
-            returnedQuantityMap.set(
-              item.order_item_id,
-              current + item.quantity,
-            );
+              returnedQuantityMap.set(
+                item.order_item_id,
+                current + item.quantity,
+              );
+            }
           }
 
           // ------------------------------------------------
@@ -325,32 +336,38 @@ export const getMyReturnById = async (userId, returnId) => {
 // ============================================================
 
 export const cancelReturnRequest = async (userId, returnId) => {
-  const returnRecord = await prisma.returns.findFirst({
+  const result = await prisma.returns.updateMany({
     where: {
       id: returnId,
       user_id: userId,
-    },
-  });
-
-  if (!returnRecord) {
-    throw new AppError("Return request not found", 404);
-  }
-
-  if (returnRecord.status !== RETURN_STATUS.REQUESTED) {
-    throw new AppError("Only requested returns can be cancelled", 400);
-  }
-
-  return prisma.returns.update({
-    where: {
-      id: returnId,
+      status: RETURN_STATUS.REQUESTED,
     },
 
     data: {
       status: RETURN_STATUS.CANCELLED,
-
       cancelled_at: new Date(),
-
       updated_at: new Date(),
+    },
+  });
+
+  if (result.count === 0) {
+    const returnRecord = await prisma.returns.findFirst({
+      where: {
+        id: returnId,
+        user_id: userId,
+      },
+    });
+
+    if (!returnRecord) {
+      throw new AppError("Return request not found", 404);
+    }
+
+    throw new AppError("Only requested returns can be cancelled", 400);
+  }
+
+  return prisma.returns.findUnique({
+    where: {
+      id: returnId,
     },
   });
 };
@@ -403,27 +420,38 @@ export const getReturnById = async (returnId) => {
 // ============================================================
 
 export const approveReturn = async (adminId, returnId, adminNote) => {
-  const returnRecord = await getReturnOrThrow(returnId);
-
-  if (returnRecord.status !== RETURN_STATUS.REQUESTED) {
-    throw new AppError("Only requested returns can be approved", 400);
-  }
-
-  return prisma.returns.update({
+  const result = await prisma.returns.updateMany({
     where: {
       id: returnId,
+      status: RETURN_STATUS.REQUESTED,
     },
 
     data: {
       status: RETURN_STATUS.APPROVED,
-
       admin_note: adminNote ?? null,
-
       approved_by: adminId,
-
       approved_at: new Date(),
-
       updated_at: new Date(),
+    },
+  });
+
+  if (result.count === 0) {
+    const returnRecord = await prisma.returns.findUnique({
+      where: {
+        id: returnId,
+      },
+    });
+
+    if (!returnRecord) {
+      throw new AppError("Return request not found", 404);
+    }
+
+    throw new AppError("Only requested returns can be approved", 400);
+  }
+
+  return prisma.returns.findUnique({
+    where: {
+      id: returnId,
     },
   });
 };
@@ -434,31 +462,42 @@ export const approveReturn = async (adminId, returnId, adminNote) => {
 // ============================================================
 
 export const rejectReturn = async (adminId, returnId, adminNote) => {
-  const returnRecord = await getReturnOrThrow(returnId);
-
-  if (returnRecord.status !== RETURN_STATUS.REQUESTED) {
-    throw new AppError("Only requested returns can be rejected", 400);
-  }
-
   if (!adminNote) {
     throw new AppError("Admin note is required when rejecting a return", 400);
   }
 
-  return prisma.returns.update({
+  const result = await prisma.returns.updateMany({
     where: {
       id: returnId,
+      status: RETURN_STATUS.REQUESTED,
     },
 
     data: {
       status: RETURN_STATUS.REJECTED,
-
       admin_note: adminNote,
-
       rejected_by: adminId,
-
       rejected_at: new Date(),
-
       updated_at: new Date(),
+    },
+  });
+
+  if (result.count === 0) {
+    const returnRecord = await prisma.returns.findUnique({
+      where: {
+        id: returnId,
+      },
+    });
+
+    if (!returnRecord) {
+      throw new AppError("Return request not found", 404);
+    }
+
+    throw new AppError("Only requested returns can be rejected", 400);
+  }
+
+  return prisma.returns.findUnique({
+    where: {
+      id: returnId,
     },
   });
 };
@@ -469,11 +508,11 @@ export const rejectReturn = async (adminId, returnId, adminNote) => {
 // ============================================================
 
 export const markReturnReceived = async (adminId, returnId, adminNote) => {
-  const returnRecord = await getReturnOrThrow(returnId);
+  // const returnRecord = await getReturnOrThrow(returnId);
 
-  if (returnRecord.status !== RETURN_STATUS.APPROVED) {
-    throw new AppError("Only approved returns can be marked as received", 400);
-  }
+  // if (returnRecord.status !== RETURN_STATUS.APPROVED) {
+  //   throw new AppError("Only approved returns can be marked as received", 400);
+  // }
 
   return prisma.$transaction(async (tx) => {
     const currentReturn = await tx.returns.findUnique({
@@ -495,6 +534,24 @@ export const markReturnReceived = async (adminId, returnId, adminNote) => {
     }
 
     if (currentReturn.status !== RETURN_STATUS.APPROVED) {
+      throw new AppError("Return is no longer awaiting receipt", 409);
+    }
+
+    const receiveClaim = await tx.returns.updateMany({
+      where: {
+        id: returnId,
+        status: RETURN_STATUS.APPROVED,
+      },
+      data: {
+        status: RETURN_STATUS.RECEIVED,
+        admin_note: adminNote ?? undefined,
+        received_by: adminId,
+        received_at: new Date(),
+        updated_at: new Date(),
+      },
+    });
+
+    if (receiveClaim.count !== 1) {
       throw new AppError("Return is no longer awaiting receipt", 409);
     }
 
@@ -563,21 +620,9 @@ export const markReturnReceived = async (adminId, returnId, adminNote) => {
     // Mark return as received
     // --------------------------------------------
 
-    return tx.returns.update({
+    return tx.returns.findUnique({
       where: {
         id: returnId,
-      },
-
-      data: {
-        status: RETURN_STATUS.RECEIVED,
-
-        admin_note: adminNote ?? undefined,
-
-        received_by: adminId,
-
-        received_at: new Date(),
-
-        updated_at: new Date(),
       },
     });
   });
@@ -588,346 +633,391 @@ export const markReturnReceived = async (adminId, returnId, adminNote) => {
 // PROCESS REFUND
 // ============================================================
 
-export const processReturnRefund = async (
-    returnId
-) => {
-    // ========================================================
-    // STEP 1 — Atomically claim the refund
-    // ========================================================
+export const processReturnRefund = async (returnId) => {
+  // ========================================================
+  // STEP 1 — Load return and validate basic state
+  // ========================================================
 
-    const claimResult =
-        await prisma.returns.updateMany({
-            where: {
-                id: returnId,
-                status: RETURN_STATUS.RECEIVED,
-                razorpay_refund_id: null,
+  const initialReturn = await getReturnOrThrow(returnId);
+
+  if (initialReturn.status === RETURN_STATUS.REFUNDED) {
+    throw new AppError("This return has already been refunded", 409);
+  }
+
+  if (initialReturn.status !== RETURN_STATUS.RECEIVED) {
+    throw new AppError("Return is not eligible for refund", 400);
+  }
+
+  if (initialReturn.razorpay_refund_id) {
+    throw new AppError(
+      "A refund is already being processed for this return",
+      409,
+    );
+  }
+
+  // ========================================================
+  // STEP 2 — Claim this return
+  // ========================================================
+
+  const claimResult = await prisma.returns.updateMany({
+    where: {
+      id: returnId,
+      status: RETURN_STATUS.RECEIVED,
+      razorpay_refund_id: null,
+    },
+    data: {
+      razorpay_refund_id: `PENDING-${returnId}`,
+      updated_at: new Date(),
+    },
+  });
+
+  if (claimResult.count !== 1) {
+    const currentReturn = await getReturnOrThrow(returnId);
+
+    if (currentReturn.status === RETURN_STATUS.REFUNDED) {
+      throw new AppError("This return has already been refunded", 409);
+    }
+
+    if (currentReturn.razorpay_refund_id) {
+      throw new AppError(
+        "A refund is already being processed for this return",
+        409,
+      );
+    }
+
+    throw new AppError("Return is no longer eligible for refund", 409);
+  }
+
+  // ========================================================
+  // STEP 3 — Load claimed return
+  // ========================================================
+
+  let returnRecord;
+
+  try {
+    returnRecord = await getReturnOrThrow(returnId);
+  } catch (error) {
+    await prisma.returns.updateMany({
+      where: {
+        id: returnId,
+        razorpay_refund_id: `PENDING-${returnId}`,
+      },
+      data: {
+        razorpay_refund_id: null,
+        updated_at: new Date(),
+      },
+    });
+
+    throw error;
+  }
+
+  const order = returnRecord.orders;
+
+  // ========================================================
+  // STEP 4 — Validate payment information
+  // ========================================================
+
+  if (order.payment_status !== "paid") {
+    await prisma.returns.updateMany({
+      where: {
+        id: returnId,
+        razorpay_refund_id: `PENDING-${returnId}`,
+      },
+      data: {
+        razorpay_refund_id: null,
+        updated_at: new Date(),
+      },
+    });
+
+    throw new AppError("Order payment is not eligible for refund", 400);
+  }
+
+  if (!order.razorpay_payment_id) {
+    await prisma.returns.updateMany({
+      where: {
+        id: returnId,
+        razorpay_refund_id: `PENDING-${returnId}`,
+      },
+      data: {
+        razorpay_refund_id: null,
+        updated_at: new Date(),
+      },
+    });
+
+    throw new AppError("Razorpay payment ID is missing", 500);
+  }
+
+  // ========================================================
+  // STEP 5 — Validate refund amount
+  // ========================================================
+
+  const refundAmount = Number(returnRecord.refund_amount);
+
+  if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
+    await prisma.returns.updateMany({
+      where: {
+        id: returnId,
+        razorpay_refund_id: `PENDING-${returnId}`,
+      },
+      data: {
+        razorpay_refund_id: null,
+        updated_at: new Date(),
+      },
+    });
+
+    throw new AppError("Invalid return refund amount", 400);
+  }
+
+  const amountInPaise = Math.round(refundAmount * 100);
+
+  let refundRequestStarted = false;
+  // ========================================================
+  // STEP 6 — Serialize refunds for this order
+  // ========================================================
+
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        /*
+         * PostgreSQL advisory transaction lock.
+         *
+         * All refund attempts for the same order use the
+         * same lock key, so only one can perform the
+         * refundable-amount check + Razorpay refund at
+         * a time.
+         *
+         * Different orders use different keys.
+         */
+        await tx.$queryRaw`
+                SELECT pg_advisory_xact_lock(
+                    hashtextextended(${order.id}::text, 0)
+                )
+            `;
+
+        // ------------------------------------------------
+        // Re-read the return inside the transaction
+        // ------------------------------------------------
+
+        const currentReturn = await tx.returns.findUnique({
+          where: {
+            id: returnId,
+          },
+          include: {
+            orders: true,
+            return_items: {
+              include: {
+                order_items: true,
+              },
             },
-            data: {
-                razorpay_refund_id: `PENDING-${returnId}`,
-                updated_at: new Date(),
-            },
+          },
         });
 
-    if (claimResult.count !== 1) {
-        const currentReturn =
-            await getReturnOrThrow(returnId);
-
-        if (
-            currentReturn.status ===
-            RETURN_STATUS.REFUNDED
-        ) {
-            throw new AppError(
-                "This return has already been refunded",
-                409
-            );
+        if (!currentReturn) {
+          throw new AppError("Return request not found", 404);
         }
 
-        if (
-            currentReturn.razorpay_refund_id
-        ) {
-            throw new AppError(
-                "A refund is already being processed for this return",
-                409
-            );
+        if (currentReturn.status !== RETURN_STATUS.RECEIVED) {
+          throw new AppError("Return is no longer eligible for refund", 409);
         }
 
-        throw new AppError(
-            "Return is not eligible for refund",
-            400
-        );
-    }
+        if (currentReturn.razorpay_refund_id !== `PENDING-${returnId}`) {
+          throw new AppError("Return refund claim is no longer active", 409);
+        }
 
-    // ========================================================
-    // STEP 2 — Load the return after claiming it
-    // ========================================================
+        // ------------------------------------------------
+        // Verify payment directly with Razorpay
+        // ------------------------------------------------
 
-    let returnRecord;
+        let payment;
 
-    try {
-        returnRecord =
-            await getReturnOrThrow(returnId);
-    } catch (error) {
-        // Release claim if something went wrong
-        await prisma.returns.updateMany({
-            where: {
-                id: returnId,
-                razorpay_refund_id: `PENDING-${returnId}`,
-            },
-            data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
-            },
-        });
-
-        throw error;
-    }
-
-    const order =
-        returnRecord.orders;
-
-    // ========================================================
-    // STEP 3 — Validate payment
-    // ========================================================
-
-    if (
-        order.payment_status !==
-        "paid"
-    ) {
-        await prisma.returns.updateMany({
-            where: {
-                id: returnId,
-                razorpay_refund_id:
-                    `PENDING-${returnId}`,
-            },
-            data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
-            },
-        });
-
-        throw new AppError(
-            "Order payment is not eligible for refund",
-            400
-        );
-    }
-
-    if (!order.razorpay_payment_id) {
-        await prisma.returns.updateMany({
-            where: {
-                id: returnId,
-                razorpay_refund_id:
-                    `PENDING-${returnId}`,
-            },
-            data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
-            },
-        });
-
-        throw new AppError(
-            "Razorpay payment ID is missing",
-            500
-        );
-    }
-
-    // ========================================================
-    // STEP 4 — Validate refund amount
-    // ========================================================
-
-    const refundAmount =
-        Number(
-            returnRecord.refund_amount
-        );
-
-    if (
-        !Number.isFinite(
-            refundAmount
-        ) ||
-        refundAmount <= 0
-    ) {
-        await prisma.returns.updateMany({
-            where: {
-                id: returnId,
-                razorpay_refund_id:
-                    `PENDING-${returnId}`,
-            },
-            data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
-            },
-        });
-
-        throw new AppError(
-            "Invalid return refund amount",
-            400
-        );
-    }
-
-    const amountInPaise =
-        Math.round(
-            refundAmount * 100
-        );
-
-    // ========================================================
-    // STEP 5 — Verify payment directly with Razorpay
-    // ========================================================
-
-    let payment;
-
-    try {
-        payment =
-            await razorpay.payments.fetch(
-                order.razorpay_payment_id
-            );
-    } catch (error) {
-        console.error(
+        try {
+          payment = await razorpay.payments.fetch(
+            currentReturn.orders.razorpay_payment_id,
+          );
+        } catch (error) {
+          console.error(
             "Razorpay payment fetch failed:",
-            error?.error || error
-        );
+            error?.error || error,
+          );
 
-        await prisma.returns.updateMany({
+          await tx.returns.updateMany({
             where: {
-                id: returnId,
-                razorpay_refund_id:
-                    `PENDING-${returnId}`,
+              id: returnId,
+              razorpay_refund_id: `PENDING-${returnId}`,
             },
             data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
+              razorpay_refund_id: null,
+              updated_at: new Date(),
             },
-        });
+          });
 
-        throw new AppError(
-            "Unable to verify payment with Razorpay",
-            502
-        );
-    }
+          throw new AppError("Unable to verify payment with Razorpay", 502);
+        }
 
-    // ========================================================
-    // STEP 6 — Payment must be captured/refunded
-    // ========================================================
+        // ------------------------------------------------
+        // Payment must be captured
+        // ------------------------------------------------
 
-    if (
-        payment.status !== "captured"
-        // &&ṭ
-        // payment.status !== "refunded"
-    ) {
-        await prisma.returns.updateMany({
+        if (payment.status !== "captured") {
+          await tx.returns.updateMany({
             where: {
-                id: returnId,
-                razorpay_refund_id:
-                    `PENDING-${returnId}`,
+              id: returnId,
+              razorpay_refund_id: `PENDING-${returnId}`,
             },
             data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
+              razorpay_refund_id: null,
+              updated_at: new Date(),
             },
-        });
+          });
 
-        throw new AppError(
+          throw new AppError(
             `Payment cannot be refunded. Current status: ${payment.status}`,
-            400
-        );
-    }
+            400,
+          );
+        }
 
-    // ========================================================
-    // STEP 7 — Check remaining refundable amount
-    // ========================================================
-
-    const alreadyRefundedAmount =
-        Number(
-            payment.amount_refunded || 0
+        const expectedPaymentAmount = Math.round(
+          Number(currentReturn.orders.total_amount) * 100,
         );
 
-    const remainingRefundableAmount =
-        Number(payment.amount) -
-        alreadyRefundedAmount;
+        if (
+          payment.order_id !== currentReturn.orders.razorpay_order_id ||
+          payment.currency !== "INR" ||
+          payment.amount !== expectedPaymentAmount
+        ) {
+          throw new AppError(
+            "Razorpay payment does not match the order amount, currency, or order ID",
+            400,
+          );
+        }
 
-    if (
-        amountInPaise >
-        remainingRefundableAmount
-    ) {
-        await prisma.returns.updateMany({
+        // ------------------------------------------------
+        // Check remaining refundable amount
+        // ------------------------------------------------
+
+        const alreadyRefundedAmount = Number(payment.amount_refunded || 0);
+
+        const remainingRefundableAmount =
+          Number(payment.amount) - alreadyRefundedAmount;
+
+        if (amountInPaise > remainingRefundableAmount) {
+          await tx.returns.updateMany({
             where: {
-                id: returnId,
-                razorpay_refund_id:
-                    `PENDING-${returnId}`,
+              id: returnId,
+              razorpay_refund_id: `PENDING-${returnId}`,
             },
             data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
+              razorpay_refund_id: null,
+              updated_at: new Date(),
             },
-        });
+          });
 
-        throw new AppError(
+          throw new AppError(
             "Return refund amount exceeds the remaining refundable amount",
-            400
-        );
-    }
+            400,
+          );
+        }
 
-    // ========================================================
-    // STEP 8 — Request Razorpay refund
-    // ========================================================
+        // ------------------------------------------------
+        // Request Razorpay refund
+        // ------------------------------------------------
 
-    let refund;
+        let refund;
+        refundRequestStarted = true;
 
-    try {
-        refund =
-            await requestRazorpayRefund(
-                order.razorpay_payment_id,
-                amountInPaise,
-                order.id,
-                `Return refund for ${returnId}`,
-                {
-                    return_id: returnId,
-                }
-            );
-    } catch (error) {
-        // We only clear the claim when Razorpay explicitly
-        // reports that the refund request failed.
-        await prisma.returns.updateMany({
-            where: {
-                id: returnId,
-                razorpay_refund_id:
-                    `PENDING-${returnId}`,
+        try {
+          refund = await requestRazorpayRefund(
+            currentReturn.orders.razorpay_payment_id,
+            amountInPaise,
+            currentReturn.orders.id,
+            `Return refund for ${returnId}`,
+            {
+              return_id: returnId,
             },
-            data: {
-                razorpay_refund_id: null,
-                updated_at: new Date(),
-            },
+          );
+        } catch (error) {
+          /*
+           * IMPORTANT:
+           *
+           * Do NOT clear the PENDING claim here.
+           *
+           * If Razorpay accepted the refund but the
+           * response was lost, clearing the claim could
+           * allow a second refund to be created.
+           *
+           * The refund webhook can reconcile this return.
+           */
+          console.error(
+            "Razorpay return refund request failed:",
+            error?.message || error,
+          );
+
+          throw error;
+        }
+
+        // ------------------------------------------------
+        // Save Razorpay refund
+        // ------------------------------------------------
+
+        const immediateRefundProcessed = refund.status === "processed";
+
+        const updatedReturn = await tx.returns.update({
+          where: {
+            id: returnId,
+          },
+          data: {
+            razorpay_refund_id: refund.id,
+
+            status: immediateRefundProcessed
+              ? RETURN_STATUS.REFUNDED
+              : RETURN_STATUS.RECEIVED,
+
+            refunded_at: immediateRefundProcessed ? new Date() : null,
+
+            updated_at: new Date(),
+          },
+          include: {
+            return_items: true,
+          },
         });
 
-        throw error;
+        return {
+          success: true,
+
+          message: immediateRefundProcessed
+            ? "Return refund was successfully processed."
+            : "Return refund was initiated and is pending.",
+
+          return: updatedReturn,
+
+          refundId: refund.id,
+
+          refundStatus: refund.status,
+        };
+      },
+      {
+        isolationLevel: "Serializable",
+      },
+    );
+  } catch (error) {
+    // Before a refund request starts, it is safe to release
+    // this claim after the transaction has rolled back.
+    // After the request starts, preserve it because Razorpay
+    // may have accepted the refund even if the response failed.
+    if (!refundRequestStarted) {
+      await prisma.returns.updateMany({
+        where: {
+          id: returnId,
+          status: RETURN_STATUS.RECEIVED,
+          razorpay_refund_id: `PENDING-${returnId}`,
+        },
+        data: {
+          razorpay_refund_id: null,
+          updated_at: new Date(),
+        },
+      });
     }
 
-    // ========================================================
-    // STEP 9 — Save the real Razorpay refund ID
-    // ========================================================
-
-    const immediateRefundProcessed =
-        refund.status === "processed";
-
-    const updatedReturn =
-        await prisma.returns.update({
-            where: {
-                id: returnId,
-            },
-            data: {
-                razorpay_refund_id:
-                    refund.id,
-
-                status:
-                    immediateRefundProcessed
-                        ? RETURN_STATUS.REFUNDED
-                        : RETURN_STATUS.RECEIVED,
-
-                refunded_at:
-                    immediateRefundProcessed
-                        ? new Date()
-                        : null,
-
-                updated_at: new Date(),
-            },
-
-            include: {
-                return_items: true,
-            },
-        });
-
-    return {
-        success: true,
-
-        message:
-            immediateRefundProcessed
-                ? "Return refund was successfully processed."
-                : "Return refund was initiated and is pending.",
-
-        return: updatedReturn,
-
-        refundId:
-            refund.id,
-
-        refundStatus:
-            refund.status,
-    };
+    throw error;
+  }
 };
