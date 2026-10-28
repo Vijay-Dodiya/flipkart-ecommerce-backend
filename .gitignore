@@ -10,3 +10,4 @@ generated/
 .claude/
 .cursor/
 .devin/
+.neon
